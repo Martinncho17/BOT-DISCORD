@@ -1,4 +1,28 @@
-import discord
+import os
+from threading import Thread
+from flask import Flask
+
+# Servidor Flask para que Render mantenga el puerto abierto
+app = Flask('')
+
+
+@app.route('/')
+def home():
+  return '¡Bot WoT Online 24/7!'
+
+
+def run():
+  port = int(os.environ.get('PORT', 10000))
+  app.run(host='0.0.0.0', port=port)
+
+
+def keep_alive():
+  t = Thread(target=run)
+  t.daemon = True
+  t.start()
+
+
+keep_alive()  # Inicia el servidor webimport discord
 from discord.ext import commands
 from discord import app_commands
 import aiohttp
