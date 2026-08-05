@@ -1,5 +1,7 @@
 import os
 from threading import Thread
+import discord
+from discord.ext import commands
 from flask import Flask
 
 # Servidor Flask para que Render mantenga el puerto abierto
