@@ -10,8 +10,8 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 WG_API_KEY = os.getenv("WG_API_KEY")
 
+# Intents necesarios
 intents = discord.Intents.default()
-intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -27,19 +27,26 @@ async def start_web_server():
     port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"Servidor web escuchando en el puerto {port}")
 
-# --- EVENTOS Y COMANDOS DEL BOT ---
+# --- EVENTO ON_READY CON SINCRONIZACIÓN DE SLASH COMMANDS ---
 @bot.event
 async def on_ready():
     print(f"Bot conectado exitosamente como {bot.user}")
+    try:
+        synced = await bot.tree.sync()
+        print(f"Sincronizados {len(synced)} comandos de barra (Slash Commands).")
+    except Exception as e:
+        print(f"Error al sincronizar comandos: {e}")
+    
     await start_web_server()
 
-@bot.command()
-async def stats(ctx, nickname: str):
-    """Obtiene las estadísticas de un jugador en World of Tanks (Servidor NA)."""
+# --- COMANDO DE BARRA /stats ---
+@bot.tree.command(name="stats", description="Obtiene las estadísticas de un jugador en World of Tanks (Servidor NA).")
+async def stats(interaction: discord.Interaction, nickname: str):
+    await interaction.response.defer() # Evita el error 'La aplicación no ha respondido'
+
     if not WG_API_KEY:
-        await ctx.send("Error: No se ha configurado la API Key de Wargaming.")
+        await interaction.followup.send("Error: No se ha configurado la API Key de Wargaming.")
         return
 
     url_search = f"https://api.worldoftanks.com/wot/account/list/?application_id={WG_API_KEY}&search={nickname}"
@@ -47,12 +54,12 @@ async def stats(ctx, nickname: str):
     async with aiohttp.ClientSession() as session:
         async with session.get(url_search) as resp:
             if resp.status != 200:
-                await ctx.send("Error de conexión con la API de Wargaming.")
+                await interaction.followup.send("Error de conexión con la API de Wargaming.")
                 return
             data = await resp.json()
 
         if data.get("status") != "ok" or not data.get("data"):
-            await ctx.send(f"Jugador `{nickname}` no encontrado.")
+            await interaction.followup.send(f"Jugador `{nickname}` no encontrado.")
             return
 
         account_id = data["data"][0]["account_id"]
@@ -63,7 +70,7 @@ async def stats(ctx, nickname: str):
             data_info = await resp.json()
 
         if data_info.get("status") != "ok" or str(account_id) not in data_info["data"]:
-            await ctx.send("No se pudieron obtener las estadísticas del jugador.")
+            await interaction.followup.send("No se pudieron obtener las estadísticas del jugador.")
             return
 
         player_data = data_info["data"][str(account_id)]
@@ -84,12 +91,7 @@ async def stats(ctx, nickname: str):
         embed.add_field(name="Daño Promedio", value=f"{avg_damage:.0f}", inline=False)
         embed.set_footer(text="Datos provistos por Wargaming API")
 
-        await ctx.send(embed=embed)
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def sync(ctx):
-    await ctx.send("Sincronización realizada correctamente.")
+        await interaction.followup.send(embed=embed)
 
 if DISCORD_TOKEN:
     bot.run(DISCORD_TOKEN)
