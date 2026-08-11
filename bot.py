@@ -6,12 +6,12 @@ import aiohttp
 import sqlite3
 import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from dotenv import load_dotenv
 from aiohttp import web
 
-# Cargar variables de entorno (.env en local, Environment Variables en Render)
+# Cargar variables de entorno
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -28,23 +28,23 @@ WN8_ROLES = [
     (0,    "🔴 Aborto",   0xE74C3C)
 ]
 
-# Base de datos
+# --- BASE DE DATOS ---
 def init_db():
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS jugadores (
-            discord_id INTEGER PRIMARY KEY,
+            discord_id INTEGER,
             guild_id INTEGER,
             wot_username TEXT,
             account_id INTEGER,
             wn8_overall INTEGER,
             wn8_reciente INTEGER,
             rol_actual TEXT,
-            ultima_actualizacion TEXT
+            ultima_actualizacion TEXT,
+            PRIMARY KEY (discord_id, guild_id)
         )
     """)
-    # Tabla de snapshots para calcular WN8 reciente
     c.execute("""
         CREATE TABLE IF NOT EXISTS snapshots (
             account_id INTEGER,
@@ -57,6 +57,14 @@ def init_db():
             spotted INTEGER,
             defense INTEGER,
             PRIMARY KEY (account_id, fecha, tank_id)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS guild_config (
+            guild_id INTEGER PRIMARY KEY,
+            channel_id INTEGER,
+            intervalo_dias INTEGER DEFAULT 3,
+            ultima_publicacion TEXT
         )
     """)
     conn.commit()
@@ -72,10 +80,10 @@ def guardar_jugador(discord_id, guild_id, wot_username, account_id, wn8_overall,
     conn.commit()
     conn.close()
 
-def obtener_todos_jugadores():
+def obtener_jugadores_por_guild(guild_id):
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
-    c.execute("SELECT * FROM jugadores")
+    c.execute("SELECT * FROM jugadores WHERE guild_id = ?", (guild_id,))
     jugadores = c.fetchall()
     conn.close()
     return jugadores
@@ -114,7 +122,44 @@ def obtener_snapshot_anterior(account_id):
     conn.close()
     return snapshot
 
-# --- SERVIDOR WEB PARA RENDER Y UPTIMEROBOT ---
+def guardar_config_guild(guild_id, channel_id, intervalo_dias):
+    conn = sqlite3.connect("wot_stats.db")
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO guild_config (guild_id, channel_id, intervalo_dias)
+        VALUES (?, ?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET
+            channel_id = excluded.channel_id,
+            intervalo_dias = excluded.intervalo_dias
+    """, (guild_id, channel_id, intervalo_dias))
+    conn.commit()
+    conn.close()
+
+def obtener_config_guild(guild_id):
+    conn = sqlite3.connect("wot_stats.db")
+    c = conn.cursor()
+    c.execute("SELECT channel_id, intervalo_dias, ultima_publicacion FROM guild_config WHERE guild_id = ?", (guild_id,))
+    res = c.fetchone()
+    conn.close()
+    return res
+
+def actualizar_fecha_publicacion(guild_id):
+    conn = sqlite3.connect("wot_stats.db")
+    c = conn.cursor()
+    hoy = datetime.now(ARGENTINA).strftime("%Y-%m-%d")
+    c.execute("UPDATE guild_config SET ultima_publicacion = ? WHERE guild_id = ?", (hoy, guild_id))
+    conn.commit()
+    conn.close()
+
+def obtener_todas_configs():
+    conn = sqlite3.connect("wot_stats.db")
+    c = conn.cursor()
+    c.execute("SELECT guild_id, channel_id, intervalo_dias, ultima_publicacion FROM guild_config")
+    configs = c.fetchall()
+    conn.close()
+    return configs
+
+# --- SERVIDOR WEB ---
 async def handle(request):
     return web.Response(text="Bot de World of Tanks activo 24/7!")
 
@@ -128,7 +173,7 @@ async def start_web_server():
     await site.start()
     print(f"Servidor web escuchando en el puerto {port}")
 
-# Intents y bot
+# --- INTENTS Y BOT ---
 intents = discord.Intents.default()
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -206,10 +251,8 @@ async def fetch_wn8(username):
         expected = await fetch_expected_values(session)
         wn8_overall = calcular_wn8(tanks, expected)
 
-        # Guardar snapshot del día
         guardar_snapshot(account_id, tanks)
 
-        # Calcular WN8 reciente con snapshot anterior
         snapshot_ant = obtener_snapshot_anterior(account_id)
         if snapshot_ant:
             tanks_diff = []
@@ -256,20 +299,107 @@ async def actualizar_jugador(guild, discord_id, wot_username, account_id, rol_ac
                 await member.add_roles(rol)
 
         guardar_jugador(discord_id, guild.id, wot_username, account_id, wn8_overall, wn8_reciente, nuevo_rol)
-        print(f"✅ Actualizado: {wot_username} | WN8: {wn8_overall} | Rol: {nuevo_rol}")
+        print(f"✅ Actualizado: {wot_username} (Guild: {guild.name}) | WN8: {wn8_overall}")
         await asyncio.sleep(3)
     except Exception as e:
         print(f"❌ Error actualizando {wot_username}: {e}")
 
+# Helper para construir el embed del reporte
+def construir_embed_reporte(guild, jugadores_list, es_prueba=False):
+    titulo = f"📢 Reporte de Estadísticas - {guild.name}"
+    if es_prueba:
+        titulo += " (Modo Prueba)"
+
+    embed = discord.Embed(
+        title=titulo,
+        description="Estado actualizado de los miembros vinculados en este servidor.",
+        color=0x2980B9
+    )
+    for j in jugadores_list:
+        _, _, wot_username, _, wn8_overall, wn8_reciente, rol_actual, ultima_act = j
+        embed.add_field(
+            name=f"{rol_actual} {wot_username}",
+            value=f"WN8 Global: `{wn8_overall}` | Reciente: `{wn8_reciente}`\nÚltima act: {ultima_act}",
+            inline=False
+        )
+    embed.set_footer(text="WoT Stats Bot • Actualizaciones automáticas")
+    return embed
+
+def construir_embed_bienvenida():
+    embed = discord.Embed(
+        title="👋 ¡Gracias por añadir TankTracker a tu servidor!",
+        description="Soy un bot especializado en registrar y rastrear el rendimiento (WN8) de los jugadores de **World of Tanks** en tu comunidad.",
+        color=0x2ECC71
+    )
+    embed.add_field(
+        name="🛠️ ¿Cómo funciona el bot?",
+        value="• Permite a cada miembro vincular su cuenta de World of Tanks.\n"
+              "• Asigna automáticamente un **Rol con Color según el WN8** del usuario.\n"
+              "• Mantiene las estadísticas siempre actualizadas de forma diaria.\n"
+              "• Envía reportes automáticos periódicos al canal que elijas.",
+        inline=False
+    )
+    embed.add_field(
+        name="📜 Comandos disponibles para todos",
+        value="`/vincular <usuario>` • Vincula tu cuenta de WoT y te da tu rol asignado.\n"
+              "`/stats <usuario>` • Consulta las estadísticas de cualquier jugador.\n"
+              "`/jugadores` • Muestra la lista con el WN8 de todos los miembros vinculados en este servidor.",
+        inline=False
+    )
+    embed.add_field(
+        name="⚙️ Configuración para Administradores",
+        value="`/configurar_canal <canal> <dias>` • Elige en qué canal publicar el reporte y cada cuántos días (ej: cada 3 días).\n"
+              "`/probar_reporte` • Manda un reporte de prueba inmediato para verificar cómo queda.",
+        inline=False
+    )
+    embed.set_footer(text="TankTracker Bot • Mantenido 24/7")
+    return embed
+
 async def tarea_actualizacion():
-    print(f"🔄 Iniciando actualización diaria - {datetime.now(ARGENTINA).strftime('%Y-%m-%d %H:%M')}")
-    jugadores = obtener_todos_jugadores()
-    for jugador in jugadores:
-        discord_id, guild_id, wot_username, account_id, _, _, rol_actual, _ = jugador
+    print(f"🔄 Iniciando ciclo diario - {datetime.now(ARGENTINA).strftime('%Y-%m-%d %H:%M')}")
+    configs = obtener_todas_configs()
+    hoy_dt = datetime.now(ARGENTINA).date()
+
+    for guild_id, channel_id, intervalo, ultima_pub in configs:
         guild = bot.get_guild(guild_id)
-        if guild:
-            await actualizar_jugador(guild, discord_id, wot_username, account_id, rol_actual)
-    print(f"✅ Actualización completada - {len(jugadores)} jugadores procesados")
+        if not guild:
+            continue
+
+        jugadores = obtener_jugadores_por_guild(guild_id)
+        for j in jugadores:
+            d_id, g_id, wot_name, acc_id, _, _, r_act, _ = j
+            await actualizar_jugador(guild, d_id, wot_name, acc_id, r_act)
+
+        debe_publicar = False
+        if not ultima_pub:
+            debe_publicar = True
+        else:
+            ultima_dt = datetime.strptime(ultima_pub, "%Y-%m-%d").date()
+            if (hoy_dt - ultima_dt).days >= intervalo:
+                debe_publicar = True
+
+        if debe_publicar and channel_id:
+            channel = guild.get_channel(channel_id)
+            if channel:
+                jugadores_actualizados = obtener_jugadores_por_guild(guild_id)
+                if jugadores_actualizados:
+                    embed = construir_embed_reporte(guild, jugadores_actualizados)
+                    await channel.send(embed=embed)
+                    actualizar_fecha_publicacion(guild_id)
+
+    print("✅ Ciclo de actualización completado.")
+
+# --- EVENTOS Y COMANDOS DISCORD ---
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    """Mensaje que se envía cuando el bot entra a un servidor por primera vez."""
+    embed = construir_embed_bienvenida()
+    
+    # Intenta enviar el mensaje en el primer canal de texto donde tenga permiso de escribir
+    for channel in guild.text_channels:
+        if channel.permissions_for(guild.me).send_messages:
+            await channel.send(embed=embed)
+            break
 
 @tree.command(name="vincular", description="Vinculá tu cuenta de WoT y obtené tu rol de WN8")
 @app_commands.describe(username="Tu nombre de usuario en World of Tanks")
@@ -303,7 +433,7 @@ async def vincular(interaction: discord.Interaction, username: str):
     embed.add_field(name="🔥 WN8 Reciente", value=f"`{wn8_reciente}`", inline=True)
     embed.add_field(name="🏅 Categoría", value=rol_nombre, inline=False)
     embed.add_field(name="🔗 Tomato.gg", value=f"[Ver perfil completo](https://tomato.gg/stats/{found_name}-{account_id}/NA)", inline=False)
-    embed.set_footer(text="WoT Stats Bot • Se actualiza todos los días a las 7am")
+    embed.set_footer(text="WoT Stats Bot • Actualizado automáticamente")
     await interaction.followup.send(embed=embed)
 
 @tree.command(name="stats", description="Consultá el WN8 de cualquier jugador de WoT")
@@ -326,13 +456,18 @@ async def stats(interaction: discord.Interaction, username: str):
     embed.set_footer(text="WoT Stats Bot • Calculado con valores esperados de XVM")
     await interaction.followup.send(embed=embed)
 
-@tree.command(name="jugadores", description="Ver todos los jugadores vinculados y sus WN8")
+@tree.command(name="jugadores", description="Ver los jugadores vinculados en este servidor y sus WN8")
 async def jugadores(interaction: discord.Interaction):
-    jugadores_list = obtener_todos_jugadores()
-    if not jugadores_list:
-        await interaction.response.send_message("No hay jugadores vinculados todavía.")
+    if not interaction.guild:
+        await interaction.response.send_message("Este comando solo se puede usar en un servidor.")
         return
-    embed = discord.Embed(title="🎮 Jugadores Vinculados", color=0x2980B9)
+
+    jugadores_list = obtener_jugadores_por_guild(interaction.guild.id)
+    if not jugadores_list:
+        await interaction.response.send_message("No hay jugadores vinculados en este servidor todavía.")
+        return
+
+    embed = discord.Embed(title=f"🎮 Jugadores Vinculados - {interaction.guild.name}", color=0x2980B9)
     for j in jugadores_list:
         _, _, wot_username, _, wn8_overall, wn8_reciente, rol_actual, ultima_act = j
         embed.add_field(
@@ -342,17 +477,72 @@ async def jugadores(interaction: discord.Interaction):
         )
     await interaction.response.send_message(embed=embed)
 
-@bot.event
+@tree.command(name="configurar_canal", description="Elige el canal y la frecuencia en días para enviar el reporte automático")
+@app_commands.describe(
+    canal="Canal de texto donde se publicará el reporte automático de este servidor",
+    dias="Cada cuántos días se enviará el reporte automático (Ejemplo: 1, 3, 7 días)"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def configurar_canal(interaction: discord.Interaction, canal: discord.TextChannel, dias: int):
+    if dias < 1:
+        await interaction.response.send_message("El intervalo de días debe ser al menos 1 día.", ephemeral=True)
+        return
+
+    guardar_config_guild(interaction.guild.id, canal.id, dias)
+    embed = discord.Embed(
+        title="⚙️ Configuración Guardada",
+        description=f"✅ **Canal asignado:** {canal.mention}\n"
+                    f"📅 **Frecuencia:** Cada **{dias}** días se publicará un reporte automático con las estadísticas actualizadas de todos los miembros vinculados en este servidor.\n\n"
+                    f"💡 *Puedes usar `/probar_reporte` para verificar la publicación.*",
+        color=0x2ECC71
+    )
+    await interaction.response.send_message(embed=embed)
+
+@tree.command(name="probar_reporte", description="Manda un reporte de prueba inmediato para verificar el funcionamiento")
+@app_commands.checks.has_permissions(administrator=True)
+async def probar_reporte(interaction: discord.Interaction):
+    if not interaction.guild:
+        await interaction.response.send_message("Este comando solo funciona dentro de un servidor.")
+        return
+
+    await interaction.response.defer()
+
+    jugadores_list = obtener_jugadores_por_guild(interaction.guild.id)
+    if not jugadores_list:
+        await interaction.followup.send("⚠️ No hay jugadores vinculados en este servidor para generar un reporte de prueba.")
+        return
+
+    config = obtener_config_guild(interaction.guild.id)
+    canal_destino = interaction.channel
+    if config and config[0]:
+        c = interaction.guild.get_channel(config[0])
+        if c:
+            canal_destino = c
+
+    embed = construir_embed_reporte(interaction.guild, jugadores_list, es_prueba=True)
+    await canal_destino.send(embed=embed)
+
+    if canal_destino != interaction.channel:
+        await interaction.followup.send(f"✅ Reporte de prueba enviado con éxito en {canal_destino.mention}")
+    else:
+        await interaction.followup.send("✅ Reporte de prueba enviado en este canal.")
+
+@tree.command(name="ayuda", description="Muestra la información de bienvenida, comandos y guía de configuración")
+async def ayuda(interaction: discord.Interaction):
+    embed = construir_embed_bienvenida()
+    await interaction.response.send_message(embed=embed)
+
+@on_ready := bot.event
 async def on_ready():
     init_db()
     await tree.sync()
     print(f"✅ Bot conectado como {bot.user}")
-    print(f"✅ Servidores: {len(bot.guilds)}")
+    print(f"✅ Servidores en los que está activo: {len(bot.guilds)}")
 
     scheduler = AsyncIOScheduler(timezone=ARGENTINA)
     scheduler.add_job(tarea_actualizacion, "cron", hour=7, minute=0)
     scheduler.start()
-    print("✅ Actualización automática programada para las 7:00am (Argentina)")
+    print("✅ Actualización automática diaria lista (7:00am Argentina).")
 
     await start_web_server()
 
