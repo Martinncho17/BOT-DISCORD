@@ -1,8 +1,9 @@
-﻿import discord
+﻿import os
+import discord
 from discord.ext import commands
 import aiohttp
-import os
 from dotenv import load_dotenv
+from aiohttp import web
 
 load_dotenv()
 
@@ -14,9 +15,25 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# --- SERVIDOR WEB PARA RENDER Y UPTIMEROBOT ---
+async def handle(request):
+    return web.Response(text="Bot de World of Tanks activo 24/7!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Servidor web escuchando en el puerto {port}")
+
+# --- EVENTOS Y COMANDOS DEL BOT ---
 @bot.event
 async def on_ready():
     print(f"Bot conectado exitosamente como {bot.user}")
+    await start_web_server()
 
 @bot.command()
 async def stats(ctx, nickname: str):
