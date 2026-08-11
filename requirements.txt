@@ -2,7 +2,4 @@ discord.py
 aiohttp
 apscheduler
 pytz
-flask
-discord.py
-aiohttp
 python-dotenv
