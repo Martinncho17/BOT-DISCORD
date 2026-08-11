@@ -1,14 +1,13 @@
-import discord
+﻿import discord
 from discord.ext import commands
 import aiohttp
 import os
 from dotenv import load_dotenv
 
-# Cargar variables de entorno desde el archivo .env
 load_dotenv()
 
-DISCORD_TOKEN = os.getenv("MTUzNDMwMjUwNDQzMzc1MDAxNg.GKSZmY.UY9agBGVMyNf9q3uzrYhN3CiQzKXvPglqwhpJU")
-WG_API_KEY = os.getenv("9249050aea31a710ece75e1f49fa70d9")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+WG_API_KEY = os.getenv("WG_API_KEY")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -23,33 +22,31 @@ async def on_ready():
 async def stats(ctx, nickname: str):
     """Obtiene las estadísticas de un jugador en World of Tanks (Servidor NA)."""
     if not WG_API_KEY:
-        await ctx.send("❌ Error: No se ha configurado la API Key de Wargaming.")
+        await ctx.send("Error: No se ha configurado la API Key de Wargaming.")
         return
 
     url_search = f"https://api.worldoftanks.com/wot/account/list/?application_id={WG_API_KEY}&search={nickname}"
 
     async with aiohttp.ClientSession() as session:
-        # 1. Buscar el account_id del jugador
         async with session.get(url_search) as resp:
             if resp.status != 200:
-                await ctx.send("❌ Error de conexión con la API de Wargaming.")
+                await ctx.send("Error de conexión con la API de Wargaming.")
                 return
             data = await resp.json()
 
         if data.get("status") != "ok" or not data.get("data"):
-            await ctx.send(f"❌ Jugador `{nickname}` no encontrado.")
+            await ctx.send(f"Jugador `{nickname}` no encontrado.")
             return
 
         account_id = data["data"][0]["account_id"]
         exact_name = data["data"][0]["nickname"]
 
-        # 2. Buscar las estadísticas detalladas
         url_info = f"https://api.worldoftanks.com/wot/account/info/?application_id={WG_API_KEY}&account_id={account_id}"
         async with session.get(url_info) as resp:
             data_info = await resp.json()
 
         if data_info.get("status") != "ok" or str(account_id) not in data_info["data"]:
-            await ctx.send("❌ No se pudieron obtener las estadísticas del jugador.")
+            await ctx.send("No se pudieron obtener las estadísticas del jugador.")
             return
 
         player_data = data_info["data"][str(account_id)]
@@ -61,14 +58,13 @@ async def stats(ctx, nickname: str):
         damage_dealt = statistics["damage_dealt"]
         avg_damage = (damage_dealt / battles) if battles > 0 else 0
 
-        # Crear Embed con la información
         embed = discord.Embed(
             title=f"Estadísticas de {exact_name}",
             color=discord.Color.gold()
         )
-        embed.add_field(name="⚔️ Batallas", value=f"{battles:,}", inline=True)
-        embed.add_field(name="🏆 Victoria %", value=f"{win_rate:.2f}%", inline=True)
-        embed.add_field(name="💥 Daño Promedio", value=f"{avg_damage:.0f}", inline=False)
+        embed.add_field(name="Batallas", value=f"{battles:,}", inline=True)
+        embed.add_field(name="Victoria %", value=f"{win_rate:.2f}%", inline=True)
+        embed.add_field(name="Daño Promedio", value=f"{avg_damage:.0f}", inline=False)
         embed.set_footer(text="Datos provistos por Wargaming API")
 
         await ctx.send(embed=embed)
@@ -76,11 +72,9 @@ async def stats(ctx, nickname: str):
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def sync(ctx):
-    """Comando para sincronizar slash commands si fuera necesario."""
-    await ctx.send("🔄 Sincronización realizada correctamente.")
+    await ctx.send("Sincronización realizada correctamente.")
 
-# Iniciar el bot con el token de las variables de entorno
 if DISCORD_TOKEN:
     bot.run(DISCORD_TOKEN)
 else:
-    print("❌ Error: No se encontró el DISCORD_TOKEN en el archivo .env")
+    print("Error: No se encontró el DISCORD_TOKEN en el archivo .env"
