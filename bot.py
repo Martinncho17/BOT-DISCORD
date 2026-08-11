@@ -28,12 +28,14 @@ WN8_ROLES = [
     (0,    "🔴 Aborto",   0xE74C3C)
 ]
 
-# --- BASE DE DATOS ---
+# --- BASE DE DATOS Y MIGRACIÓN ---
 def init_db():
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
+    
+    # 1. Crear tabla temporal o verificar migración para doble clave primaria (discord_id + guild_id)
     c.execute("""
-        CREATE TABLE IF NOT EXISTS jugadores (
+        CREATE TABLE IF NOT EXISTS jugadores_v2 (
             discord_id INTEGER,
             guild_id INTEGER,
             wot_username TEXT,
@@ -45,6 +47,24 @@ def init_db():
             PRIMARY KEY (discord_id, guild_id)
         )
     """)
+
+    # Verificar si existe la tabla vieja 'jugadores' para migrar los datos sin perderlos
+    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='jugadores'")
+    table_exists = c.fetchone()
+    
+    if table_exists:
+        # Migrar datos de la tabla vieja a la nueva si aún no se hizo
+        c.execute("""
+            INSERT OR IGNORE INTO jugadores_v2 (discord_id, guild_id, wot_username, account_id, wn8_overall, wn8_reciente, rol_actual, ultima_actualizacion)
+            SELECT discord_id, guild_id, wot_username, account_id, wn8_overall, wn8_reciente, rol_actual, ultima_actualizacion
+            FROM jugadores
+        """)
+        c.execute("DROP TABLE jugadores")
+    
+    # Renombrar la nueva tabla al nombre definitivo
+    c.execute("ALTER TABLE jugadores_v2 RENAME TO jugadores")
+    
+    # Tablas de Snapshots y Configuración
     c.execute("""
         CREATE TABLE IF NOT EXISTS snapshots (
             account_id INTEGER,
@@ -75,6 +95,7 @@ def guardar_jugador(discord_id, guild_id, wot_username, account_id, wn8_overall,
     c = conn.cursor()
     c.execute("""
         INSERT OR REPLACE INTO jugadores 
+        (discord_id, guild_id, wot_username, account_id, wn8_overall, wn8_reciente, rol_actual, ultima_actualizacion)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (discord_id, guild_id, wot_username, account_id, wn8_overall, wn8_reciente, rol, datetime.now(ARGENTINA).strftime("%Y-%m-%d %H:%M")))
     conn.commit()
@@ -394,8 +415,6 @@ async def tarea_actualizacion():
 async def on_guild_join(guild: discord.Guild):
     """Mensaje que se envía cuando el bot entra a un servidor por primera vez."""
     embed = construir_embed_bienvenida()
-    
-    # Intenta enviar el mensaje en el primer canal de texto donde tenga permiso de escribir
     for channel in guild.text_channels:
         if channel.permissions_for(guild.me).send_messages:
             await channel.send(embed=embed)
@@ -519,13 +538,16 @@ async def probar_reporte(interaction: discord.Interaction):
         if c:
             canal_destino = c
 
-    embed = construir_embed_reporte(interaction.guild, jugadores_list, es_prueba=True)
-    await canal_destino.send(embed=embed)
+    try:
+        embed = construir_embed_reporte(interaction.guild, jugadores_list, es_prueba=True)
+        await canal_destino.send(embed=embed)
 
-    if canal_destino != interaction.channel:
-        await interaction.followup.send(f"✅ Reporte de prueba enviado con éxito en {canal_destino.mention}")
-    else:
-        await interaction.followup.send("✅ Reporte de prueba enviado en este canal.")
+        if canal_destino != interaction.channel:
+            await interaction.followup.send(f"✅ Reporte de prueba enviado con éxito en {canal_destino.mention}")
+        else:
+            await interaction.followup.send("✅ Reporte de prueba enviado en este canal.")
+    except discord.errors.Forbidden:
+        await interaction.followup.send(f"❌ **Error de permisos:** El bot no tiene permiso para enviar mensajes en el canal {canal_destino.mention}. Por favor dale permisos de 'Ver Canal' y 'Enviar Mensajes'.")
 
 @tree.command(name="ayuda", description="Muestra la información de bienvenida, comandos y guía de configuración")
 async def ayuda(interaction: discord.Interaction):
@@ -535,7 +557,8 @@ async def ayuda(interaction: discord.Interaction):
 @on_ready := bot.event
 async def on_ready():
     init_db()
-    await tree.sync()
+    synced = await tree.sync()
+    print(f"✅ Se sincronizaron {len(synced)} comandos de barra diagonal.")
     print(f"✅ Bot conectado como {bot.user}")
     print(f"✅ Servidores en los que está activo: {len(bot.guilds)}")
 
