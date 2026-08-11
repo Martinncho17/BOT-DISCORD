@@ -77,4 +77,4 @@ async def sync(ctx):
 if DISCORD_TOKEN:
     bot.run(DISCORD_TOKEN)
 else:
-    print("Error: No se encontró el DISCORD_TOKEN en el archivo .env"
+    print("Error: No se encontró el DISCORD_TOKEN en las variables de entorno")
