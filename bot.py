@@ -34,7 +34,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
 import pytz
 
-DISCORD_TOKEN = "MTUzNDMwMjUwNDQzMzc1MDAxNg.GcNaCf.j2sHicwXHrbhmWGHT2ZQWBuPqXHUTedW-RPjYY"  
+DISCORD_TOKEN = "MTUzNDMwMjUwNDQzMzc1MDAxNg.GqwoPR.XNqAXOlns6BXiBpr7UsbGxyI63jVUPxzY60ofI"  
 WG_API_KEY = "9249050aea31a710ece75e1f49fa70d9"
 ARGENTINA = pytz.timezone("America/Argentina/Buenos_Aires")
 
