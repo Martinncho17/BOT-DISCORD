@@ -33,7 +33,7 @@ def init_db():
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
     
-    # 1. Crear tabla temporal o verificar migración para doble clave primaria (discord_id + guild_id)
+    # Tabla de jugadores con doble clave primaria (discord_id + guild_id)
     c.execute("""
         CREATE TABLE IF NOT EXISTS jugadores_v2 (
             discord_id INTEGER,
@@ -48,12 +48,11 @@ def init_db():
         )
     """)
 
-    # Verificar si existe la tabla vieja 'jugadores' para migrar los datos sin perderlos
+    # Verificar si existe la tabla vieja 'jugadores' para migrar datos
     c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='jugadores'")
     table_exists = c.fetchone()
     
     if table_exists:
-        # Migrar datos de la tabla vieja a la nueva si aún no se hizo
         c.execute("""
             INSERT OR IGNORE INTO jugadores_v2 (discord_id, guild_id, wot_username, account_id, wn8_overall, wn8_reciente, rol_actual, ultima_actualizacion)
             SELECT discord_id, guild_id, wot_username, account_id, wn8_overall, wn8_reciente, rol_actual, ultima_actualizacion
@@ -61,7 +60,6 @@ def init_db():
         """)
         c.execute("DROP TABLE jugadores")
     
-    # Renombrar la nueva tabla al nombre definitivo
     c.execute("ALTER TABLE jugadores_v2 RENAME TO jugadores")
     
     # Tablas de Snapshots y Configuración
@@ -302,28 +300,35 @@ async def fetch_wn8(username):
 
         return wn8_overall, wn8_reciente, account_id, found_name, tanks
 
-async def actualizar_jugador(guild, discord_id, wot_username, account_id, rol_actual):
+async def actualizar_jugador_y_roles(guild, discord_id, wot_username, account_id):
+    """Actualiza estadísticas y realiza la limpieza y reasignación automática de roles en Discord."""
     try:
         wn8_overall, wn8_reciente, _, _, _ = await fetch_wn8(wot_username)
-        nuevo_rol, color = get_rol_info(wn8_overall)
+        if wn8_overall is None:
+            return
 
-        if nuevo_rol != rol_actual:
-            member = guild.get_member(discord_id)
-            if member:
-                for _, nombre, _ in WN8_ROLES:
-                    r = discord.utils.get(guild.roles, name=nombre)
-                    if r and r in member.roles:
-                        await member.remove_roles(r)
-                rol = discord.utils.get(guild.roles, name=nuevo_rol)
-                if not rol:
-                    rol = await guild.create_role(name=nuevo_rol, color=discord.Color(color))
-                await member.add_roles(rol)
+        nuevo_rol_nombre, color = get_rol_info(wn8_overall)
+        member = guild.get_member(discord_id)
 
-        guardar_jugador(discord_id, guild.id, wot_username, account_id, wn8_overall, wn8_reciente, nuevo_rol)
-        print(f"✅ Actualizado: {wot_username} (Guild: {guild.name}) | WN8: {wn8_overall}")
-        await asyncio.sleep(3)
+        if member:
+            # 1. Eliminar AUTOMÁTICAMENTE todos los roles previos de WN8 que tenga el usuario
+            for _, nombre, _ in WN8_ROLES:
+                r = discord.utils.get(guild.roles, name=nombre)
+                if r and r in member.roles:
+                    await member.remove_roles(r)
+
+            # 2. Asignar AUTOMÁTICAMENTE el rol actualizado según su WN8 de hoy
+            rol_actualizado = discord.utils.get(guild.roles, name=nuevo_rol_nombre)
+            if not rol_actualizado:
+                rol_actualizado = await guild.create_role(name=nuevo_rol_nombre, color=discord.Color(color))
+            await member.add_roles(rol_actualizado)
+
+        # 3. Guardar el nuevo registro en la base de datos
+        guardar_jugador(discord_id, guild.id, wot_username, account_id, wn8_overall, wn8_reciente, nuevo_rol_nombre)
+        print(f"🔄 [Automático] Rol actualizado para {wot_username} en {guild.name}: {nuevo_rol_nombre}")
+        await asyncio.sleep(2)
     except Exception as e:
-        print(f"❌ Error actualizando {wot_username}: {e}")
+        print(f"❌ Error actualizando automáticamente a {wot_username}: {e}")
 
 # Helper para construir el embed del reporte
 def construir_embed_reporte(guild, jugadores_list, es_prueba=False):
@@ -343,7 +348,7 @@ def construir_embed_reporte(guild, jugadores_list, es_prueba=False):
             value=f"WN8 Global: `{wn8_overall}` | Reciente: `{wn8_reciente}`\nÚltima act: {ultima_act}",
             inline=False
         )
-    embed.set_footer(text="WoT Stats Bot • Actualizaciones automáticas")
+    embed.set_footer(text="WoT Stats Bot • Roles y estadísticas actualizadas automáticamente")
     return embed
 
 def construir_embed_bienvenida():
@@ -355,7 +360,7 @@ def construir_embed_bienvenida():
     embed.add_field(
         name="🛠️ ¿Cómo funciona el bot?",
         value="• Permite a cada miembro vincular su cuenta de World of Tanks.\n"
-              "• Asigna automáticamente un **Rol con Color según el WN8** del usuario.\n"
+              "• Actualiza y gestiona los **Roles de WN8 automáticamente**.\n"
               "• Mantiene las estadísticas siempre actualizadas de forma diaria.\n"
               "• Envía reportes automáticos periódicos al canal que elijas.",
         inline=False
@@ -369,7 +374,7 @@ def construir_embed_bienvenida():
     )
     embed.add_field(
         name="⚙️ Configuración para Administradores",
-        value="`/configurar_canal <canal> <dias>` • Elige en qué canal publicar el reporte y cada cuántos días (ej: cada 3 días).\n"
+        value="`/configurar_canal <canal> <dias>` • Elige en qué canal publicar el reporte y cada cuántos días.\n"
               "`/probar_reporte` • Manda un reporte de prueba inmediato para verificar cómo queda.",
         inline=False
     )
@@ -377,7 +382,7 @@ def construir_embed_bienvenida():
     return embed
 
 async def tarea_actualizacion():
-    print(f"🔄 Iniciando ciclo diario - {datetime.now(ARGENTINA).strftime('%Y-%m-%d %H:%M')}")
+    print(f"🔄 Iniciando ciclo diario automático - {datetime.now(ARGENTINA).strftime('%Y-%m-%d %H:%M')}")
     configs = obtener_todas_configs()
     hoy_dt = datetime.now(ARGENTINA).date()
 
@@ -386,10 +391,11 @@ async def tarea_actualizacion():
         if not guild:
             continue
 
+        # 1. Recorrer todos los jugadores del servidor, refrescar sus datos y ACTUALIZAR SUS ROLES automáticamente
         jugadores = obtener_jugadores_por_guild(guild_id)
         for j in jugadores:
-            d_id, g_id, wot_name, acc_id, _, _, r_act, _ = j
-            await actualizar_jugador(guild, d_id, wot_name, acc_id, r_act)
+            d_id, g_id, wot_name, acc_id, _, _, _, _ = j
+            await actualizar_jugador_y_roles(guild, d_id, wot_name, acc_id)
 
         debe_publicar = False
         if not ultima_pub:
@@ -399,6 +405,7 @@ async def tarea_actualizacion():
             if (hoy_dt - ultima_dt).days >= intervalo:
                 debe_publicar = True
 
+        # 2. Si corresponde publicar según los días elegidos, envía el informe actualizado
         if debe_publicar and channel_id:
             channel = guild.get_channel(channel_id)
             if channel:
@@ -408,12 +415,11 @@ async def tarea_actualizacion():
                     await channel.send(embed=embed)
                     actualizar_fecha_publicacion(guild_id)
 
-    print("✅ Ciclo de actualización completado.")
+    print("✅ Ciclo de actualización y sincronización de roles completado.")
 
 # --- EVENTOS Y COMANDOS DISCORD ---
 @bot.event
 async def on_guild_join(guild: discord.Guild):
-    """Mensaje que se envía cuando el bot entra a un servidor por primera vez."""
     embed = construir_embed_bienvenida()
     for channel in guild.text_channels:
         if channel.permissions_for(guild.me).send_messages:
@@ -433,15 +439,16 @@ async def vincular(interaction: discord.Interaction, username: str):
 
     rol_nombre, color = get_rol_info(wn8_overall)
     guild = interaction.guild
-    rol = discord.utils.get(guild.roles, name=rol_nombre)
-    if not rol:
-        rol = await guild.create_role(name=rol_nombre, color=discord.Color(color))
 
     member = interaction.user
     for _, nombre, _ in WN8_ROLES:
         r = discord.utils.get(guild.roles, name=nombre)
         if r and r in member.roles:
             await member.remove_roles(r)
+
+    rol = discord.utils.get(guild.roles, name=rol_nombre)
+    if not rol:
+        rol = await guild.create_role(name=rol_nombre, color=discord.Color(color))
     await member.add_roles(rol)
 
     guardar_jugador(member.id, guild.id, found_name, account_id, wn8_overall, wn8_reciente, rol_nombre)
