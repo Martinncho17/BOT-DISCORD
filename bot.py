@@ -575,7 +575,7 @@ async def help(interaction: discord.Interaction):
     embed = construir_embed_bienvenida()
     await interaction.response.send_message(embed=embed)
 
-@on_ready := bot.event
+@bot.event
 async def on_ready():
     init_db()
     synced = await tree.sync()

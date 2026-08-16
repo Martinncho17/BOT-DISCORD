@@ -2,3 +2,5 @@
 __pycache__/
 *.pyc
 wot_stats.db
+token bot ds.txt
+bot(codigo original).py
