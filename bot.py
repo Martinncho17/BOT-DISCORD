@@ -28,6 +28,7 @@ WN8_ROLES = [
     (300,  "🟠 Cancer",   0xE67E22),
     (0,    "🔴 Bad",      0xE74C3C)
 ]
+
 # Nombres viejos (versión en español) que hay que seguir limpiando
 # para que no queden acumulados en quienes los tenían asignados
 LEGACY_ROLE_NAMES = [
@@ -36,12 +37,15 @@ LEGACY_ROLE_NAMES = [
     "🟡 Muñones",
     "🔴 Aborto",
 ]
+
+# Cada cuántas batallas nuevas se recalcula el rol en base al rendimiento reciente
+UMBRAL_BATALLAS_RECIENTES = 100
+
 # --- DATABASE MANAGEMENT ---
 def init_db():
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
-    
-    # Player table with composite primary key (discord_id + guild_id)
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS jugadores_v2 (
             discord_id INTEGER,
@@ -56,10 +60,9 @@ def init_db():
         )
     """)
 
-    # Verify legacy 'jugadores' table to migrate existing data
     c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='jugadores'")
     table_exists = c.fetchone()
-    
+
     if table_exists:
         c.execute("""
             INSERT OR IGNORE INTO jugadores_v2 (discord_id, guild_id, wot_username, account_id, wn8_overall, wn8_reciente, rol_actual, ultima_actualizacion)
@@ -67,10 +70,18 @@ def init_db():
             FROM jugadores
         """)
         c.execute("DROP TABLE jugadores")
-    
+
     c.execute("ALTER TABLE jugadores_v2 RENAME TO jugadores")
-    
-    # Snapshots and Configuration tables
+
+    try:
+        c.execute("ALTER TABLE jugadores ADD COLUMN baseline_fecha TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE jugadores ADD COLUMN battles_baseline INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS snapshots (
             account_id INTEGER,
@@ -100,17 +111,21 @@ def guardar_jugador(discord_id, guild_id, wot_username, account_id, wn8_overall,
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
     c.execute("""
-        INSERT OR REPLACE INTO jugadores 
-        (discord_id, guild_id, wot_username, account_id, wn8_overall, wn8_reciente, rol_actual, ultima_actualizacion)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (discord_id, guild_id, wot_username, account_id, wn8_overall, wn8_reciente, rol, datetime.now(ARGENTINA).strftime("%Y-%m-%d %H:%M")))
+        INSERT OR REPLACE INTO jugadores
+        (discord_id, guild_id, wot_username, account_id, wn8_overall, wn8_reciente, rol_actual, ultima_actualizacion,
+         baseline_fecha, battles_baseline)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+                COALESCE((SELECT baseline_fecha FROM jugadores WHERE discord_id = ? AND guild_id = ?), NULL),
+                COALESCE((SELECT battles_baseline FROM jugadores WHERE discord_id = ? AND guild_id = ?), 0))
+    """, (discord_id, guild_id, wot_username, account_id, wn8_overall, wn8_reciente, rol, datetime.now(ARGENTINA).strftime("%Y-%m-%d %H:%M"),
+          discord_id, guild_id, discord_id, guild_id))
     conn.commit()
     conn.close()
 
 def obtener_jugadores_por_guild(guild_id):
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
-    c.execute("SELECT * FROM jugadores WHERE guild_id = ?", (guild_id,))
+    c.execute("SELECT discord_id, guild_id, wot_username, account_id, wn8_overall, wn8_reciente, rol_actual, ultima_actualizacion FROM jugadores WHERE guild_id = ?", (guild_id,))
     jugadores = c.fetchall()
     conn.close()
     return jugadores
@@ -132,8 +147,8 @@ def obtener_snapshot_anterior(account_id):
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
     c.execute("""
-        SELECT DISTINCT fecha FROM snapshots 
-        WHERE account_id = ? 
+        SELECT DISTINCT fecha FROM snapshots
+        WHERE account_id = ?
         ORDER BY fecha DESC LIMIT 2
     """, (account_id,))
     fechas = c.fetchall()
@@ -142,12 +157,38 @@ def obtener_snapshot_anterior(account_id):
         return None
     fecha_anterior = fechas[1][0]
     c.execute("""
-        SELECT tank_id, battles, damage, wins, frags, spotted, defense 
+        SELECT tank_id, battles, damage, wins, frags, spotted, defense
         FROM snapshots WHERE account_id = ? AND fecha = ?
     """, (account_id, fecha_anterior))
     snapshot = {row[0]: row[1:] for row in c.fetchall()}
     conn.close()
     return snapshot
+
+def obtener_snapshot_por_fecha(account_id, fecha):
+    conn = sqlite3.connect("wot_stats.db")
+    c = conn.cursor()
+    c.execute("""
+        SELECT tank_id, battles, damage, wins, frags, spotted, defense
+        FROM snapshots WHERE account_id = ? AND fecha = ?
+    """, (account_id, fecha))
+    snapshot = {row[0]: row[1:] for row in c.fetchall()}
+    conn.close()
+    return snapshot
+
+def obtener_baseline(discord_id, guild_id):
+    conn = sqlite3.connect("wot_stats.db")
+    c = conn.cursor()
+    c.execute("SELECT baseline_fecha, battles_baseline FROM jugadores WHERE discord_id = ? AND guild_id = ?", (discord_id, guild_id))
+    res = c.fetchone()
+    conn.close()
+    return res
+
+def actualizar_baseline(discord_id, guild_id, fecha, battles):
+    conn = sqlite3.connect("wot_stats.db")
+    c = conn.cursor()
+    c.execute("UPDATE jugadores SET baseline_fecha = ?, battles_baseline = ? WHERE discord_id = ? AND guild_id = ?", (fecha, battles, discord_id, guild_id))
+    conn.commit()
+    conn.close()
 
 def guardar_config_guild(guild_id, channel_id, intervalo_dias):
     conn = sqlite3.connect("wot_stats.db")
@@ -308,40 +349,92 @@ async def fetch_wn8(username):
 
         return wn8_overall, wn8_reciente, account_id, found_name, tanks
 
+async def calcular_wn8_para_rol(discord_id, guild_id, account_id, tanks, wn8_overall):
+    """
+    Decide qué WN8 usar para asignar el rol:
+    - Si el jugador todavía no jugó UMBRAL_BATALLAS_RECIENTES batallas nuevas
+      desde su último "punto de partida", se usa el WN8 Overall (estable).
+    - Si ya jugó esa cantidad o más, se calcula el WN8 solo de esa ventana
+      de batallas nuevas, se usa ese para el rol, y se resetea el punto de partida.
+    """
+    if not tanks:
+        return wn8_overall
+
+    battles_actuales = sum(t["all"]["battles"] for t in tanks)
+    baseline = obtener_baseline(discord_id, guild_id)
+    hoy = datetime.now(ARGENTINA).strftime("%Y-%m-%d")
+
+    if not baseline or not baseline[0]:
+        actualizar_baseline(discord_id, guild_id, hoy, battles_actuales)
+        return wn8_overall
+
+    baseline_fecha, battles_baseline = baseline
+    battles_desde_baseline = battles_actuales - (battles_baseline or 0)
+
+    if battles_desde_baseline < UMBRAL_BATALLAS_RECIENTES:
+        return wn8_overall
+
+    snapshot_base = obtener_snapshot_por_fecha(account_id, baseline_fecha)
+    if not snapshot_base:
+        actualizar_baseline(discord_id, guild_id, hoy, battles_actuales)
+        return wn8_overall
+
+    tanks_ventana = []
+    for tank in tanks:
+        tid = tank["tank_id"]
+        if tid in snapshot_base:
+            base = snapshot_base[tid]
+            diff_battles = tank["all"]["battles"] - base[0]
+            if diff_battles > 0:
+                tanks_ventana.append({
+                    "tank_id": tid,
+                    "all": {
+                        "battles": diff_battles,
+                        "damage_dealt": tank["all"]["damage_dealt"] - base[1],
+                        "wins": tank["all"]["wins"] - base[2],
+                        "frags": tank["all"]["frags"] - base[3],
+                        "spotted": tank["all"]["spotted"] - base[4],
+                        "dropped_capture_points": tank["all"]["dropped_capture_points"] - base[5]
+                    }
+                })
+        else:
+            tanks_ventana.append(tank)
+
+    async with aiohttp.ClientSession() as session:
+        expected = await fetch_expected_values(session)
+    wn8_ventana = calcular_wn8(tanks_ventana, expected) if tanks_ventana else wn8_overall
+
+    actualizar_baseline(discord_id, guild_id, hoy, battles_actuales)
+    return wn8_ventana
+
 async def actualizar_jugador_y_roles(guild, discord_id, wot_username, account_id):
     """Refreshes player stats and automatically updates WN8 roles in background."""
     try:
-        wn8_overall, wn8_reciente, _, _, _ = await fetch_wn8(wot_username)
+        wn8_overall, wn8_reciente, _, _, tanks = await fetch_wn8(wot_username)
         if wn8_overall is None:
             return
 
-        nuevo_rol_nombre, color = get_rol_info(wn8_overall)
+        wn8_para_rol = await calcular_wn8_para_rol(discord_id, guild.id, account_id, tanks, wn8_overall)
+        nuevo_rol_nombre, color = get_rol_info(wn8_para_rol)
         member = guild.get_member(discord_id)
 
         if member:
-            # 1. Remove previous WN8 roles automatically (incluye nombres viejos)
             nombres_a_limpiar = [nombre for _, nombre, _ in WN8_ROLES] + LEGACY_ROLE_NAMES
-            roles_a_quitar = [
-                r for r in member.roles
-                if r.name in nombres_a_limpiar
-            ]
+            roles_a_quitar = [r for r in member.roles if r.name in nombres_a_limpiar]
             if roles_a_quitar:
                 await member.remove_roles(*roles_a_quitar)
 
-            # 2. Assign newly updated role
             rol_actualizado = discord.utils.get(guild.roles, name=nuevo_rol_nombre)
             if not rol_actualizado:
                 rol_actualizado = await guild.create_role(name=nuevo_rol_nombre, color=discord.Color(color))
             await member.add_roles(rol_actualizado)
 
-        # 3. Save to database
         guardar_jugador(discord_id, guild.id, wot_username, account_id, wn8_overall, wn8_reciente, nuevo_rol_nombre)
         print(f"🔄 [Auto] Updated role for {wot_username} in {guild.name}: {nuevo_rol_nombre}")
         await asyncio.sleep(2)
     except Exception as e:
         print(f"❌ Error updating {wot_username}: {e}")
 
-# Helper for Report Embed
 def construir_embed_reporte(guild, jugadores_list, es_prueba=False):
     titulo = f"📢 Statistics Report - {guild.name}"
     if es_prueba:
@@ -372,7 +465,7 @@ def construir_embed_bienvenida():
         name="🛠️ How does it work?",
         value="• Members can link their World of Tanks account.\n"
               "• Automatically assigns and updates **WN8 Roles**.\n"
-              "• Keeps track of daily player performance.\n"
+              "• Role updates use your overall WN8, and switch to your last 100 battles once you've played that many.\n"
               "• Sends periodic automated stats reports to your configured channel.",
         inline=False
     )
@@ -386,7 +479,8 @@ def construir_embed_bienvenida():
     embed.add_field(
         name="⚙️ Admin Configuration",
         value="`/setup_channel <channel> <days>` • Set the channel and frequency (in days) for automatic reports.\n"
-              "`/test_report` • Send an immediate test report to verify the output.",
+              "`/test_report` • Send an immediate test report to verify the output.\n"
+              "`/cleanup_roles` • One-time cleanup of duplicated/legacy WN8 roles.",
         inline=False
     )
     embed.set_footer(text="TankTracker Bot • Maintained 24/7")
@@ -402,7 +496,6 @@ async def tarea_actualizacion():
         if not guild:
             continue
 
-        # Refresh stats and sync roles for all linked players
         jugadores = obtener_jugadores_por_guild(guild_id)
         for j in jugadores:
             d_id, g_id, wot_name, acc_id, _, _, _, _ = j
@@ -427,7 +520,6 @@ async def tarea_actualizacion():
 
     print("✅ Automated daily cycle and role sync completed.")
 
-# --- DISCORD EVENTS AND SLASH COMMANDS ---
 @bot.event
 async def on_guild_join(guild: discord.Guild):
     embed = construir_embed_bienvenida()
@@ -440,21 +532,23 @@ async def on_guild_join(guild: discord.Guild):
 @app_commands.describe(username="Your World of Tanks username")
 async def link(interaction: discord.Interaction, username: str):
     await interaction.response.defer()
-    wn8_overall, wn8_reciente, account_id, found_name, _ = await fetch_wn8(username)
+    wn8_overall, wn8_reciente, account_id, found_name, tanks = await fetch_wn8(username)
 
     if wn8_overall is None:
         embed = discord.Embed(title="❌ Player Not Found", description=f"Could not find any player named **{username}**.", color=0xE74C3C)
         await interaction.followup.send(embed=embed)
         return
 
-    rol_nombre, color = get_rol_info(wn8_overall)
     guild = interaction.guild
-
     member = interaction.user
-    for _, nombre, _ in WN8_ROLES:
-        r = discord.utils.get(guild.roles, name=nombre)
-        if r and r in member.roles:
-            await member.remove_roles(r)
+
+    wn8_para_rol = await calcular_wn8_para_rol(member.id, guild.id, account_id, tanks, wn8_overall)
+    rol_nombre, color = get_rol_info(wn8_para_rol)
+
+    nombres_a_limpiar = [nombre for _, nombre, _ in WN8_ROLES] + LEGACY_ROLE_NAMES
+    roles_a_quitar = [r for r in member.roles if r.name in nombres_a_limpiar]
+    if roles_a_quitar:
+        await member.remove_roles(*roles_a_quitar)
 
     rol = discord.utils.get(guild.roles, name=rol_nombre)
     if not rol:
@@ -579,6 +673,7 @@ async def test_report(interaction: discord.Interaction):
             await interaction.followup.send("✅ Test report sent in this channel.")
     except discord.errors.Forbidden:
         await interaction.followup.send(f"❌ **Permission Error:** The bot lacks permissions to send messages in {canal_destino.mention}. Please grant 'View Channel' and 'Send Messages' permissions.")
+
 @tree.command(name="cleanup_roles", description="[Admin] Elimina roles WN8 duplicados o viejos de todos los miembros")
 @app_commands.checks.has_permissions(administrator=True)
 async def cleanup_roles(interaction: discord.Interaction):
@@ -592,7 +687,6 @@ async def cleanup_roles(interaction: discord.Interaction):
             await member.remove_roles(*roles_legacy_del_miembro)
             limpiados += 1
 
-    # Borra del servidor los roles viejos que ya quedaron sin uso
     roles_borrados = 0
     for nombre_viejo in LEGACY_ROLE_NAMES:
         rol = discord.utils.get(guild.roles, name=nombre_viejo)
@@ -604,6 +698,7 @@ async def cleanup_roles(interaction: discord.Interaction):
         f"✅ Limpieza completada. {limpiados} miembros tenían roles viejos, {roles_borrados} roles legacy eliminados del servidor.",
         ephemeral=True
     )
+
 @tree.command(name="help", description="Show bot information, commands list, and admin guide")
 async def help(interaction: discord.Interaction):
     embed = construir_embed_bienvenida()
