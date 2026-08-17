@@ -28,7 +28,14 @@ WN8_ROLES = [
     (300,  "🟠 Cancer",   0xE67E22),
     (0,    "🔴 Bad",      0xE74C3C)
 ]
-
+# Nombres viejos (versión en español) que hay que seguir limpiando
+# para que no queden acumulados en quienes los tenían asignados
+LEGACY_ROLE_NAMES = [
+    "🔵 Descente",
+    "🩵 Jugador",
+    "🟡 Muñones",
+    "🔴 Aborto",
+]
 # --- DATABASE MANAGEMENT ---
 def init_db():
     conn = sqlite3.connect("wot_stats.db")
@@ -312,11 +319,14 @@ async def actualizar_jugador_y_roles(guild, discord_id, wot_username, account_id
         member = guild.get_member(discord_id)
 
         if member:
-            # 1. Remove previous WN8 roles automatically
-            for _, nombre, _ in WN8_ROLES:
-                r = discord.utils.get(guild.roles, name=nombre)
-                if r and r in member.roles:
-                    await member.remove_roles(r)
+            # 1. Remove previous WN8 roles automatically (incluye nombres viejos)
+            nombres_a_limpiar = [nombre for _, nombre, _ in WN8_ROLES] + LEGACY_ROLE_NAMES
+            roles_a_quitar = [
+                r for r in member.roles
+                if r.name in nombres_a_limpiar
+            ]
+            if roles_a_quitar:
+                await member.remove_roles(*roles_a_quitar)
 
             # 2. Assign newly updated role
             rol_actualizado = discord.utils.get(guild.roles, name=nuevo_rol_nombre)
@@ -569,7 +579,31 @@ async def test_report(interaction: discord.Interaction):
             await interaction.followup.send("✅ Test report sent in this channel.")
     except discord.errors.Forbidden:
         await interaction.followup.send(f"❌ **Permission Error:** The bot lacks permissions to send messages in {canal_destino.mention}. Please grant 'View Channel' and 'Send Messages' permissions.")
+@tree.command(name="cleanup_roles", description="[Admin] Elimina roles WN8 duplicados o viejos de todos los miembros")
+@app_commands.checks.has_permissions(administrator=True)
+async def cleanup_roles(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    limpiados = 0
 
+    for member in guild.members:
+        roles_legacy_del_miembro = [r for r in member.roles if r.name in LEGACY_ROLE_NAMES]
+        if roles_legacy_del_miembro:
+            await member.remove_roles(*roles_legacy_del_miembro)
+            limpiados += 1
+
+    # Borra del servidor los roles viejos que ya quedaron sin uso
+    roles_borrados = 0
+    for nombre_viejo in LEGACY_ROLE_NAMES:
+        rol = discord.utils.get(guild.roles, name=nombre_viejo)
+        if rol:
+            await rol.delete(reason="Limpieza de roles legacy")
+            roles_borrados += 1
+
+    await interaction.followup.send(
+        f"✅ Limpieza completada. {limpiados} miembros tenían roles viejos, {roles_borrados} roles legacy eliminados del servidor.",
+        ephemeral=True
+    )
 @tree.command(name="help", description="Show bot information, commands list, and admin guide")
 async def help(interaction: discord.Interaction):
     embed = construir_embed_bienvenida()
