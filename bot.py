@@ -607,7 +607,13 @@ async def jugador(interaction: discord.Interaction, username: str = None):
     # Traemos las batallas en tiempo real desde la API de Wargaming
     _, _, _, _, tanks = await fetch_wn8(wot_username)
     battles_totales = sum(t["all"]["battles"] for t in tanks) if tanks else 0
-    battles_baseline = battles_baseline or 0
+    hoy = datetime.now(ARGENTINA).strftime("%Y-%m-%d")
+
+    # SI NO HAY BASELINE INICIALIZADO (O ES 0): Lo establecemos ahora mismo con las batallas actuales
+    if not baseline_fecha or not battles_baseline or battles_baseline == 0:
+        actualizar_baseline(interaction.user.id, interaction.guild.id, hoy, battles_totales)
+        battles_baseline = battles_totales
+        baseline_fecha = hoy
 
     # Batallas disputadas en esta ventana de seguimiento
     batallas_en_ventana = max(0, battles_totales - battles_baseline)
@@ -639,7 +645,7 @@ async def jugador(interaction: discord.Interaction, username: str = None):
     embed.add_field(name="📊 Progreso para nuevo rol (Ventana de 100 batallas)", value=info_progreso, inline=False)
     
     if baseline_fecha:
-        embed.add_field(name="📅 Fecha del último reset", value=f"`{baseline_fecha}`", inline=True)
+        embed.add_field(name="📅 Fecha de inicio de ventana", value=f"`{baseline_fecha}`", inline=True)
     embed.add_field(name="🕒 Última sincro de datos", value=f"`{ultima_act}`", inline=True)
 
     embed.add_field(
