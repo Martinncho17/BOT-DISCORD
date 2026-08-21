@@ -368,13 +368,6 @@ async def fetch_wn8(username):
         return wn8_overall, wn8_reciente, account_id, found_name, tanks
 
 async def calcular_wn8_para_rol(discord_id, guild_id, account_id, tanks, wn8_overall):
-    """
-    Decide qué WN8 usar para asignar el rol:
-    - Si el jugador todavía no jugó UMBRAL_BATALLAS_RECIENTES batallas nuevas
-      desde su último "punto de partida", se usa el WN8 Overall (estable).
-    - Si ya jugó esa cantidad o más, se calcula el WN8 solo de esa ventana
-      de batallas nuevas, se usa ese para el rol, y se resetea el punto de partida.
-    """
     if not tanks:
         return wn8_overall
 
@@ -426,7 +419,6 @@ async def calcular_wn8_para_rol(discord_id, guild_id, account_id, tanks, wn8_ove
     return wn8_ventana
 
 async def actualizar_jugador_y_roles(guild, discord_id, wot_username, account_id):
-    """Refreshes player stats and automatically updates WN8 roles in background."""
     try:
         wn8_overall, wn8_reciente, _, _, tanks = await fetch_wn8(wot_username)
         if wn8_overall is None:
@@ -645,7 +637,7 @@ async def jugador(interaction: discord.Interaction, username: str = None):
     embed.add_field(name="📊 Progreso para nuevo rol (Ventana de 100 batallas)", value=info_progreso, inline=False)
     
     if baseline_fecha:
-        embed.add_field(name="📅 Fecha de inicio de ventana", value=f"`{baseline_fecha}`", inline=True)
+        embed.add_field(name="📅 Inicio de Ventana", value=f"`{baseline_fecha}`\n(`{battles_baseline:,}` batallas)", inline=True)
     embed.add_field(name="🕒 Última sincro de datos", value=f"`{ultima_act}`", inline=True)
 
     embed.add_field(
