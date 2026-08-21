@@ -30,7 +30,6 @@ WN8_ROLES = [
 ]
 
 # Nombres viejos (versión en español) que hay que seguir limpiando
-# para que no queden acumulados en quienes los tenían asignados
 LEGACY_ROLE_NAMES = [
     "🔵 Descente",
     "🩵 Jugador",
@@ -129,6 +128,25 @@ def obtener_jugadores_por_guild(guild_id):
     jugadores = c.fetchall()
     conn.close()
     return jugadores
+
+def obtener_progreso_jugador(discord_id, guild_id, wot_username=None):
+    conn = sqlite3.connect("wot_stats.db")
+    c = conn.cursor()
+    if wot_username:
+        c.execute("""
+            SELECT wot_username, account_id, wn8_overall, wn8_reciente, rol_actual, ultima_actualizacion, baseline_fecha, battles_baseline 
+            FROM jugadores 
+            WHERE guild_id = ? AND LOWER(wot_username) = LOWER(?)
+        """, (guild_id, wot_username))
+    else:
+        c.execute("""
+            SELECT wot_username, account_id, wn8_overall, wn8_reciente, rol_actual, ultima_actualizacion, baseline_fecha, battles_baseline 
+            FROM jugadores 
+            WHERE guild_id = ? AND discord_id = ?
+        """, (guild_id, discord_id))
+    res = c.fetchone()
+    conn.close()
+    return res
 
 def guardar_snapshot(account_id, tanks):
     conn = sqlite3.connect("wot_stats.db")
@@ -472,6 +490,7 @@ def construir_embed_bienvenida():
     embed.add_field(
         name="📜 Commands for Everyone",
         value="`/link <username>` • Link your WoT account and receive your WN8 role.\n"
+              "`/jugador [username]` • Check 100-battle threshold progress and stats.\n"
               "`/stats <username>` • Search WN8 stats for any World of Tanks player.\n"
               "`/players` • Display all linked members in this server.",
         inline=False
@@ -564,6 +583,72 @@ async def link(interaction: discord.Interaction, username: str):
     embed.add_field(name="🏅 Rank", value=rol_nombre, inline=False)
     embed.add_field(name="🔗 Tomato.gg", value=f"[View Full Profile](https://tomato.gg/stats/{found_name}-{account_id}/NA)", inline=False)
     embed.set_footer(text="WoT Stats Bot • Updated automatically")
+    await interaction.followup.send(embed=embed)
+
+@tree.command(name="jugador", description="Muestra las batallas actuales y cuánto falta para recalcular el rol (100 batallas)")
+@app_commands.describe(username="Nombre de usuario en WoT (opcional si ya estás vinculado)")
+async def jugador(interaction: discord.Interaction, username: str = None):
+    if not interaction.guild:
+        await interaction.response.send_message("Este comando solo funciona dentro de un servidor.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    datos = obtener_progreso_jugador(interaction.user.id, interaction.guild.id, username)
+
+    if not datos:
+        msg = f"No se encontró al jugador `{username}` en este servidor." if username else "No tienes tu cuenta vinculada. Usa `/link <nickname>` primero."
+        embed_error = discord.Embed(title="❌ Jugador no encontrado", description=msg, color=0xE74C3C)
+        await interaction.followup.send(embed=embed_error)
+        return
+
+    wot_username, account_id, wn8_overall, wn8_reciente, rol_actual, ultima_act, baseline_fecha, battles_baseline = datos
+
+    # Traemos las batallas en tiempo real desde la API de Wargaming
+    _, _, _, _, tanks = await fetch_wn8(wot_username)
+    battles_totales = sum(t["all"]["battles"] for t in tanks) if tanks else 0
+    battles_baseline = battles_baseline or 0
+
+    # Batallas disputadas en esta ventana de seguimiento
+    batallas_en_ventana = max(0, battles_totales - battles_baseline)
+    restantes = max(0, UMBRAL_BATALLAS_RECIENTES - batallas_en_ventana)
+    porcentaje = min(100, int((batallas_en_ventana / UMBRAL_BATALLAS_RECIENTES) * 100))
+
+    # Barra visual (10 bloques)
+    bloques_llenos = int(porcentaje / 10)
+    barra = "🟦" * bloques_llenos + "⬜" * (10 - bloques_llenos)
+
+    rol_nombre, color = get_rol_info(wn8_overall)
+
+    embed = discord.Embed(title=f"👤 Estado de {wot_username}", color=color)
+    embed.add_field(name="🏅 Rol Registrado", value=f"**{rol_actual}**", inline=True)
+    embed.add_field(name="⚔️ WN8 Overall", value=f"`{wn8_overall}`", inline=True)
+    embed.add_field(name="🔥 WN8 Reciente", value=f"`{wn8_reciente}`", inline=True)
+    embed.add_field(name="💥 Batallas Totales", value=f"`{battles_totales:,}`", inline=True)
+
+    # Detalle claro del progreso
+    info_progreso = (
+        f"{barra} **{porcentaje}%**\n"
+        f"• **Jugadas en la ventana actual:** `{batallas_en_ventana}` / `{UMBRAL_BATALLAS_RECIENTES}` batallas\n"
+    )
+    if restantes > 0:
+        info_progreso += f"• **Faltan:** **{restantes}** batallas para actualizar el rol según el rendimiento reciente."
+    else:
+        info_progreso += "• ⚡ **¡Listo para actualizar!** Ya superó las 100 batallas. El rol cambiará en el reporte diario o al usar `/link`."
+
+    embed.add_field(name="📊 Progreso para nuevo rol (Ventana de 100 batallas)", value=info_progreso, inline=False)
+    
+    if baseline_fecha:
+        embed.add_field(name="📅 Fecha del último reset", value=f"`{baseline_fecha}`", inline=True)
+    embed.add_field(name="🕒 Última sincro de datos", value=f"`{ultima_act}`", inline=True)
+
+    embed.add_field(
+        name="🔗 Enlaces", 
+        value=f"[Ver Perfil en Tomato.gg](https://tomato.gg/stats/{wot_username}-{account_id}/NA)", 
+        inline=False
+    )
+    embed.set_footer(text="TankTracker Bot • Seguimiento dinámico de WN8")
+
     await interaction.followup.send(embed=embed)
 
 @tree.command(name="stats", description="Check WN8 stats for any World of Tanks player")
