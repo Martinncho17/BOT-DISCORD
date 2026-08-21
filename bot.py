@@ -596,13 +596,13 @@ async def jugador(interaction: discord.Interaction, username: str = None):
 
     wot_username, account_id, wn8_overall, wn8_reciente, rol_actual, ultima_act, baseline_fecha, battles_baseline = datos
 
-    # Traemos las batallas en tiempo real desde la API de Wargaming
+    # Traemos las batallas en tiempo real desde la API para EL JUGADOR CONSULTADO
     _, _, _, _, tanks = await fetch_wn8(wot_username)
     battles_totales = sum(t["all"]["battles"] for t in tanks) if tanks else 0
     hoy = datetime.now(ARGENTINA).strftime("%Y-%m-%d")
 
-    # SI NO HAY BASELINE INICIALIZADO (O ES 0): Lo establecemos ahora mismo con las batallas actuales
-    if not baseline_fecha or not battles_baseline or battles_baseline == 0:
+    # Si no hay baseline guardado o si el baseline era erróneo (mayor a las batallas totales actuales), lo corregimos con las batallas reales del usuario
+    if not baseline_fecha or not battles_baseline or battles_baseline == 0 or battles_baseline > battles_totales:
         actualizar_baseline(interaction.user.id, interaction.guild.id, hoy, battles_totales)
         battles_baseline = battles_totales
         baseline_fecha = hoy
