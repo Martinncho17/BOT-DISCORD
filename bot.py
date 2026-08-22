@@ -29,7 +29,7 @@ WN8_ROLES = [
     (0,    "🔴 Bad",      0xE74C3C)
 ]
 
-# Nombres viejos (versión en español) que hay que seguir limpiando
+# Legacy role names to clean up during role syncs
 LEGACY_ROLE_NAMES = [
     "🔵 Descente",
     "🩵 Jugador",
@@ -37,8 +37,8 @@ LEGACY_ROLE_NAMES = [
     "🔴 Aborto",
 ]
 
-# Cada cuántas batallas nuevas se recalcula el rol en base al rendimiento reciente
-UMBRAL_BATALLAS_RECIENTES = 100
+# Number of new battles before recalculating role based on recent performance
+RECENT_BATTLES_THRESHOLD = 100
 
 # --- DATABASE MANAGEMENT ---
 def init_db():
@@ -120,6 +120,15 @@ def guardar_jugador(discord_id, guild_id, wot_username, account_id, wn8_overall,
           discord_id, guild_id, discord_id, guild_id))
     conn.commit()
     conn.close()
+
+def eliminar_jugador(discord_id, guild_id):
+    conn = sqlite3.connect("wot_stats.db")
+    c = conn.cursor()
+    c.execute("DELETE FROM jugadores WHERE discord_id = ? AND guild_id = ?", (discord_id, guild_id))
+    rows_affected = c.rowcount
+    conn.commit()
+    conn.close()
+    return rows_affected > 0
 
 def obtener_jugadores_por_guild(guild_id):
     conn = sqlite3.connect("wot_stats.db")
@@ -382,7 +391,7 @@ async def calcular_wn8_para_rol(discord_id, guild_id, account_id, tanks, wn8_ove
     baseline_fecha, battles_baseline = baseline
     battles_desde_baseline = battles_actuales - (battles_baseline or 0)
 
-    if battles_desde_baseline < UMBRAL_BATALLAS_RECIENTES:
+    if battles_desde_baseline < RECENT_BATTLES_THRESHOLD:
         return wn8_overall
 
     snapshot_base = obtener_snapshot_por_fecha(account_id, baseline_fecha)
@@ -482,7 +491,8 @@ def construir_embed_bienvenida():
     embed.add_field(
         name="📜 Commands for Everyone",
         value="`/link <username>` • Link your WoT account and receive your WN8 role.\n"
-              "`/jugador [username]` • Check 100-battle threshold progress and stats.\n"
+              "`/unlink` • Unlink your registered WoT account and remove associated roles.\n"
+              "`/player [username]` • Check 100-battle threshold progress and stats.\n"
               "`/stats <username>` • Search WN8 stats for any World of Tanks player.\n"
               "`/players` • Display all linked members in this server.",
         inline=False
@@ -491,7 +501,7 @@ def construir_embed_bienvenida():
         name="⚙️ Admin Configuration",
         value="`/setup_channel <channel> <days>` • Set the channel and frequency (in days) for automatic reports.\n"
               "`/test_report` • Send an immediate test report to verify the output.\n"
-              "`/cleanup_roles` • One-time cleanup of duplicated/legacy WN8 roles.",
+              "`/cleanup_roles` • One-time cleanup of duplicated or legacy WN8 roles.",
         inline=False
     )
     embed.set_footer(text="TankTracker Bot • Maintained 24/7")
@@ -577,11 +587,49 @@ async def link(interaction: discord.Interaction, username: str):
     embed.set_footer(text="WoT Stats Bot • Updated automatically")
     await interaction.followup.send(embed=embed)
 
-@tree.command(name="jugador", description="Muestra las batallas actuales y cuánto falta para recalcular el rol (100 batallas)")
-@app_commands.describe(username="Nombre de usuario en WoT (opcional si ya estás vinculado)")
-async def jugador(interaction: discord.Interaction, username: str = None):
+@tree.command(name="unlink", description="Unlink your World of Tanks account from this server")
+async def unlink(interaction: discord.Interaction):
     if not interaction.guild:
-        await interaction.response.send_message("Este comando solo funciona dentro de un servidor.", ephemeral=True)
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    
+    guild = interaction.guild
+    member = interaction.user
+
+    exito = eliminar_jugador(member.id, guild.id)
+
+    if not exito:
+        embed = discord.Embed(
+            title="⚠️ No Linked Account",
+            description="You do not have a registered account in this server.",
+            color=0xF1C40F
+        )
+        await interaction.followup.send(embed=embed)
+        return
+
+    nombres_a_limpiar = [nombre for _, nombre, _ in WN8_ROLES] + LEGACY_ROLE_NAMES
+    roles_a_quitar = [r for r in member.roles if r.name in nombres_a_limpiar]
+    if roles_a_quitar:
+        try:
+            await member.remove_roles(*roles_a_quitar)
+        except discord.errors.Forbidden:
+            pass
+
+    embed = discord.Embed(
+        title="🔗 Account Unlinked",
+        description="Your World of Tanks account has been successfully unlinked and performance roles removed.",
+        color=0x2ECC71
+    )
+    embed.set_footer(text="WoT Stats Bot • Unlinked successfully")
+    await interaction.followup.send(embed=embed)
+
+@tree.command(name="player", description="View progress towards WN8 role recalculation (100 battles threshold)")
+@app_commands.describe(username="WoT username (optional if already linked)")
+async def player(interaction: discord.Interaction, username: str = None):
+    if not interaction.guild:
+        await interaction.response.send_message("This command can only be used inside a server.", ephemeral=True)
         return
 
     await interaction.response.defer()
@@ -589,63 +637,58 @@ async def jugador(interaction: discord.Interaction, username: str = None):
     datos = obtener_progreso_jugador(interaction.user.id, interaction.guild.id, username)
 
     if not datos:
-        msg = f"No se encontró al jugador `{username}` en este servidor." if username else "No tienes tu cuenta vinculada. Usa `/link <nickname>` primero."
-        embed_error = discord.Embed(title="❌ Jugador no encontrado", description=msg, color=0xE74C3C)
+        msg = f"Player `{username}` was not found in this server." if username else "You have not linked your account yet. Use `/link <nickname>` first."
+        embed_error = discord.Embed(title="❌ Player Not Found", description=msg, color=0xE74C3C)
         await interaction.followup.send(embed=embed_error)
         return
 
     wot_username, account_id, wn8_overall, wn8_reciente, rol_actual, ultima_act, baseline_fecha, battles_baseline = datos
 
-    # Traemos las batallas en tiempo real desde la API para EL JUGADOR CONSULTADO
     _, _, _, _, tanks = await fetch_wn8(wot_username)
     battles_totales = sum(t["all"]["battles"] for t in tanks) if tanks else 0
     hoy = datetime.now(ARGENTINA).strftime("%Y-%m-%d")
 
-    # Si no hay baseline guardado o si el baseline era erróneo (mayor a las batallas totales actuales), lo corregimos con las batallas reales del usuario
     if not baseline_fecha or not battles_baseline or battles_baseline == 0 or battles_baseline > battles_totales:
         actualizar_baseline(interaction.user.id, interaction.guild.id, hoy, battles_totales)
         battles_baseline = battles_totales
         baseline_fecha = hoy
 
-    # Batallas disputadas en esta ventana de seguimiento
     batallas_en_ventana = max(0, battles_totales - battles_baseline)
-    restantes = max(0, UMBRAL_BATALLAS_RECIENTES - batallas_en_ventana)
-    porcentaje = min(100, int((batallas_en_ventana / UMBRAL_BATALLAS_RECIENTES) * 100))
+    restantes = max(0, RECENT_BATTLES_THRESHOLD - batallas_en_ventana)
+    porcentaje = min(100, int((batallas_en_ventana / RECENT_BATTLES_THRESHOLD) * 100))
 
-    # Barra visual (10 bloques)
     bloques_llenos = int(porcentaje / 10)
     barra = "🟦" * bloques_llenos + "⬜" * (10 - bloques_llenos)
 
     rol_nombre, color = get_rol_info(wn8_overall)
 
-    embed = discord.Embed(title=f"👤 Estado de {wot_username}", color=color)
-    embed.add_field(name="🏅 Rol Registrado", value=f"**{rol_actual}**", inline=True)
-    embed.add_field(name="⚔️ WN8 Overall", value=f"`{wn8_overall}`", inline=True)
-    embed.add_field(name="🔥 WN8 Reciente", value=f"`{wn8_reciente}`", inline=True)
-    embed.add_field(name="💥 Batallas Totales", value=f"`{battles_totales:,}`", inline=True)
+    embed = discord.Embed(title=f"👤 Player Profile - {wot_username}", color=color)
+    embed.add_field(name="🏅 Assigned Role", value=f"**{rol_actual}**", inline=True)
+    embed.add_field(name="⚔️ Overall WN8", value=f"`{wn8_overall}`", inline=True)
+    embed.add_field(name="🔥 Recent WN8", value=f"`{wn8_reciente}`", inline=True)
+    embed.add_field(name="💥 Total Battles", value=f"`{battles_totales:,}`", inline=True)
 
-    # Detalle claro del progreso
     info_progreso = (
         f"{barra} **{porcentaje}%**\n"
-        f"• **Jugadas en la ventana actual:** `{batallas_en_ventana}` / `{UMBRAL_BATALLAS_RECIENTES}` batallas\n"
+        f"• **Played in current window:** `{batallas_en_ventana}` / `{RECENT_BATTLES_THRESHOLD}` battles\n"
     )
     if restantes > 0:
-        info_progreso += f"• **Faltan:** **{restantes}** batallas para actualizar el rol según el rendimiento reciente."
+        info_progreso += f"• **Remaining:** **{restantes}** battles to update role based on recent performance."
     else:
-        info_progreso += "• ⚡ **¡Listo para actualizar!** Ya superó las 100 batallas. El rol cambiará en el reporte diario o al usar `/link`."
+        info_progreso += "• ⚡ **Ready to update!** You have completed over 100 battles. Your role will update during the daily report or upon using `/link`."
 
-    embed.add_field(name="📊 Progreso para nuevo rol (Ventana de 100 batallas)", value=info_progreso, inline=False)
+    embed.add_field(name="📊 Progress for New Role (100 Battles Window)", value=info_progreso, inline=False)
     
     if baseline_fecha:
-        embed.add_field(name="📅 Inicio de Ventana", value=f"`{baseline_fecha}`\n(`{battles_baseline:,}` batallas)", inline=True)
-    embed.add_field(name="🕒 Última sincro de datos", value=f"`{ultima_act}`", inline=True)
+        embed.add_field(name="📅 Window Start Date", value=f"`{baseline_fecha}`\n(`{battles_baseline:,}` battles)", inline=True)
+    embed.add_field(name="🕒 Last Data Sync", value=f"`{ultima_act}`", inline=True)
 
     embed.add_field(
-        name="🔗 Enlaces", 
-        value=f"[Ver Perfil en Tomato.gg](https://tomato.gg/stats/{wot_username}-{account_id}/NA)", 
+        name="🔗 Links", 
+        value=f"[View Profile on Tomato.gg](https://tomato.gg/stats/{wot_username}-{account_id}/NA)", 
         inline=False
     )
-    embed.set_footer(text="TankTracker Bot • Seguimiento dinámico de WN8")
+    embed.set_footer(text="TankTracker Bot • Dynamic WN8 Tracking")
 
     await interaction.followup.send(embed=embed)
 
@@ -757,7 +800,7 @@ async def test_report(interaction: discord.Interaction):
     except discord.errors.Forbidden:
         await interaction.followup.send(f"❌ **Permission Error:** The bot lacks permissions to send messages in {canal_destino.mention}. Please grant 'View Channel' and 'Send Messages' permissions.")
 
-@tree.command(name="cleanup_roles", description="[Admin] Elimina roles WN8 duplicados o viejos de todos los miembros")
+@tree.command(name="cleanup_roles", description="[Admin] Remove duplicate or legacy WN8 roles from all server members")
 @app_commands.checks.has_permissions(administrator=True)
 async def cleanup_roles(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -774,11 +817,11 @@ async def cleanup_roles(interaction: discord.Interaction):
     for nombre_viejo in LEGACY_ROLE_NAMES:
         rol = discord.utils.get(guild.roles, name=nombre_viejo)
         if rol:
-            await rol.delete(reason="Limpieza de roles legacy")
+            await rol.delete(reason="Cleanup legacy roles")
             roles_borrados += 1
 
     await interaction.followup.send(
-        f"✅ Limpieza completada. {limpiados} miembros tenían roles viejos, {roles_borrados} roles legacy eliminados del servidor.",
+        f"✅ Cleanup completed. {limpiados} members had legacy roles removed, {roles_borrados} legacy roles deleted from the server.",
         ephemeral=True
     )
 
