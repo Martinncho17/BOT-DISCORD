@@ -16,7 +16,7 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 WG_API_KEY = os.getenv("WG_API_KEY")
-ARGENTINA = pytz.timezone("America/Argentina/Buenos_Aires")
+TIMEZONE = pytz.timezone("America/Argentina/Buenos_Aires")
 
 # Standardized WN8 Scale & Roles
 WN8_ROLES = [
@@ -106,7 +106,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-def guardar_jugador(discord_id, guild_id, wot_username, account_id, wn8_overall, wn8_reciente, rol):
+def save_player(discord_id, guild_id, wot_username, account_id, wn8_overall, wn8_recent, role):
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
     c.execute("""
@@ -116,12 +116,12 @@ def guardar_jugador(discord_id, guild_id, wot_username, account_id, wn8_overall,
         VALUES (?, ?, ?, ?, ?, ?, ?, ?,
                 COALESCE((SELECT baseline_fecha FROM jugadores WHERE discord_id = ? AND guild_id = ?), NULL),
                 COALESCE((SELECT battles_baseline FROM jugadores WHERE discord_id = ? AND guild_id = ?), 0))
-    """, (discord_id, guild_id, wot_username, account_id, wn8_overall, wn8_reciente, rol, datetime.now(ARGENTINA).strftime("%Y-%m-%d %H:%M"),
+    """, (discord_id, guild_id, wot_username, account_id, wn8_overall, wn8_recent, role, datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M"),
           discord_id, guild_id, discord_id, guild_id))
     conn.commit()
     conn.close()
 
-def eliminar_jugador(discord_id, guild_id):
+def delete_player(discord_id, guild_id):
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
     c.execute("DELETE FROM jugadores WHERE discord_id = ? AND guild_id = ?", (discord_id, guild_id))
@@ -130,15 +130,27 @@ def eliminar_jugador(discord_id, guild_id):
     conn.close()
     return rows_affected > 0
 
-def obtener_jugadores_por_guild(guild_id):
+def delete_player_admin(target_id, guild_id, wot_username=None):
+    conn = sqlite3.connect("wot_stats.db")
+    c = conn.cursor()
+    if wot_username:
+        c.execute("DELETE FROM jugadores WHERE guild_id = ? AND LOWER(wot_username) = LOWER(?)", (guild_id, wot_username))
+    else:
+        c.execute("DELETE FROM jugadores WHERE discord_id = ? AND guild_id = ?", (target_id, guild_id))
+    rows_affected = c.rowcount
+    conn.commit()
+    conn.close()
+    return rows_affected > 0
+
+def get_players_by_guild(guild_id):
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
     c.execute("SELECT discord_id, guild_id, wot_username, account_id, wn8_overall, wn8_reciente, rol_actual, ultima_actualizacion FROM jugadores WHERE guild_id = ?", (guild_id,))
-    jugadores = c.fetchall()
+    players = c.fetchall()
     conn.close()
-    return jugadores
+    return players
 
-def obtener_progreso_jugador(discord_id, guild_id, wot_username=None):
+def get_player_progress(discord_id, guild_id, wot_username=None):
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
     if wot_username:
@@ -157,20 +169,20 @@ def obtener_progreso_jugador(discord_id, guild_id, wot_username=None):
     conn.close()
     return res
 
-def guardar_snapshot(account_id, tanks):
+def save_snapshot(account_id, tanks):
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
-    fecha = datetime.now(ARGENTINA).strftime("%Y-%m-%d")
+    date_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
     for tank in tanks:
         s = tank["all"]
         c.execute("""
             INSERT OR REPLACE INTO snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (account_id, fecha, tank["tank_id"], s["battles"], s["damage_dealt"],
+        """, (account_id, date_str, tank["tank_id"], s["battles"], s["damage_dealt"],
               s["wins"], s["frags"], s["spotted"], s["dropped_capture_points"]))
     conn.commit()
     conn.close()
 
-def obtener_snapshot_anterior(account_id):
+def get_previous_snapshot(account_id):
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
     c.execute("""
@@ -178,31 +190,31 @@ def obtener_snapshot_anterior(account_id):
         WHERE account_id = ?
         ORDER BY fecha DESC LIMIT 2
     """, (account_id,))
-    fechas = c.fetchall()
-    if len(fechas) < 2:
+    dates = c.fetchall()
+    if len(dates) < 2:
         conn.close()
         return None
-    fecha_anterior = fechas[1][0]
+    previous_date = dates[1][0]
     c.execute("""
         SELECT tank_id, battles, damage, wins, frags, spotted, defense
         FROM snapshots WHERE account_id = ? AND fecha = ?
-    """, (account_id, fecha_anterior))
+    """, (account_id, previous_date))
     snapshot = {row[0]: row[1:] for row in c.fetchall()}
     conn.close()
     return snapshot
 
-def obtener_snapshot_por_fecha(account_id, fecha):
+def get_snapshot_by_date(account_id, date_str):
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
     c.execute("""
         SELECT tank_id, battles, damage, wins, frags, spotted, defense
         FROM snapshots WHERE account_id = ? AND fecha = ?
-    """, (account_id, fecha))
+    """, (account_id, date_str))
     snapshot = {row[0]: row[1:] for row in c.fetchall()}
     conn.close()
     return snapshot
 
-def obtener_baseline(discord_id, guild_id):
+def get_baseline(discord_id, guild_id):
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
     c.execute("SELECT baseline_fecha, battles_baseline FROM jugadores WHERE discord_id = ? AND guild_id = ?", (discord_id, guild_id))
@@ -210,14 +222,14 @@ def obtener_baseline(discord_id, guild_id):
     conn.close()
     return res
 
-def actualizar_baseline(discord_id, guild_id, fecha, battles):
+def update_baseline(discord_id, guild_id, date_str, battles):
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
-    c.execute("UPDATE jugadores SET baseline_fecha = ?, battles_baseline = ? WHERE discord_id = ? AND guild_id = ?", (fecha, battles, discord_id, guild_id))
+    c.execute("UPDATE jugadores SET baseline_fecha = ?, battles_baseline = ? WHERE discord_id = ? AND guild_id = ?", (date_str, battles, discord_id, guild_id))
     conn.commit()
     conn.close()
 
-def guardar_config_guild(guild_id, channel_id, intervalo_dias):
+def save_guild_config(guild_id, channel_id, interval_days):
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
     c.execute("""
@@ -226,11 +238,11 @@ def guardar_config_guild(guild_id, channel_id, intervalo_dias):
         ON CONFLICT(guild_id) DO UPDATE SET
             channel_id = excluded.channel_id,
             intervalo_dias = excluded.intervalo_dias
-    """, (guild_id, channel_id, intervalo_dias))
+    """, (guild_id, channel_id, interval_days))
     conn.commit()
     conn.close()
 
-def obtener_config_guild(guild_id):
+def get_guild_config(guild_id):
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
     c.execute("SELECT channel_id, intervalo_dias, ultima_publicacion FROM guild_config WHERE guild_id = ?", (guild_id,))
@@ -238,15 +250,15 @@ def obtener_config_guild(guild_id):
     conn.close()
     return res
 
-def actualizar_fecha_publicacion(guild_id):
+def update_publish_date(guild_id):
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
-    hoy = datetime.now(ARGENTINA).strftime("%Y-%m-%d")
-    c.execute("UPDATE guild_config SET ultima_publicacion = ? WHERE guild_id = ?", (hoy, guild_id))
+    today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    c.execute("UPDATE guild_config SET ultima_publicacion = ? WHERE guild_id = ?", (today, guild_id))
     conn.commit()
     conn.close()
 
-def obtener_todas_configs():
+def get_all_configs():
     conn = sqlite3.connect("wot_stats.db")
     c = conn.cursor()
     c.execute("SELECT guild_id, channel_id, intervalo_dias, ultima_publicacion FROM guild_config")
@@ -274,10 +286,10 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
-def get_rol_info(wn8):
-    for minimo, nombre, color in WN8_ROLES:
-        if wn8 >= minimo:
-            return nombre, color
+def get_role_info(wn8):
+    for minimum, name, color in WN8_ROLES:
+        if wn8 >= minimum:
+            return name, color
     return "🔴 Bad", 0xE74C3C
 
 async def fetch_expected_values(session):
@@ -286,7 +298,7 @@ async def fetch_expected_values(session):
         data = await r.json(content_type=None)
         return {tank["IDNum"]: tank for tank in data["data"]}
 
-def calcular_wn8(tanks_list, expected):
+def calculate_wn8(tanks_list, expected):
     total_battles = 0
     total_wn8 = 0
     for tank in tanks_list:
@@ -344,17 +356,17 @@ async def fetch_wn8(username):
             return 0, 0, account_id, found_name, []
 
         expected = await fetch_expected_values(session)
-        wn8_overall = calcular_wn8(tanks, expected)
+        wn8_overall = calculate_wn8(tanks, expected)
 
-        guardar_snapshot(account_id, tanks)
+        save_snapshot(account_id, tanks)
 
-        snapshot_ant = obtener_snapshot_anterior(account_id)
-        if snapshot_ant:
+        prev_snapshot = get_previous_snapshot(account_id)
+        if prev_snapshot:
             tanks_diff = []
             for tank in tanks:
                 tid = tank["tank_id"]
-                if tid in snapshot_ant:
-                    ant = snapshot_ant[tid]
+                if tid in prev_snapshot:
+                    ant = prev_snapshot[tid]
                     diff_battles = tank["all"]["battles"] - ant[0]
                     if diff_battles > 0:
                         tanks_diff.append({
@@ -370,43 +382,43 @@ async def fetch_wn8(username):
                         })
                 else:
                     tanks_diff.append(tank)
-            wn8_reciente = calcular_wn8(tanks_diff, expected) if tanks_diff else wn8_overall
+            wn8_recent = calculate_wn8(tanks_diff, expected) if tanks_diff else wn8_overall
         else:
-            wn8_reciente = wn8_overall
+            wn8_recent = wn8_overall
 
-        return wn8_overall, wn8_reciente, account_id, found_name, tanks
+        return wn8_overall, wn8_recent, account_id, found_name, tanks
 
-async def calcular_wn8_para_rol(discord_id, guild_id, account_id, tanks, wn8_overall):
+async def calculate_wn8_for_role(discord_id, guild_id, account_id, tanks, wn8_overall):
     if not tanks:
         return wn8_overall
 
-    battles_actuales = sum(t["all"]["battles"] for t in tanks)
-    baseline = obtener_baseline(discord_id, guild_id)
-    hoy = datetime.now(ARGENTINA).strftime("%Y-%m-%d")
+    current_battles = sum(t["all"]["battles"] for t in tanks)
+    baseline = get_baseline(discord_id, guild_id)
+    today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
     if not baseline or not baseline[0]:
-        actualizar_baseline(discord_id, guild_id, hoy, battles_actuales)
+        update_baseline(discord_id, guild_id, today, current_battles)
         return wn8_overall
 
-    baseline_fecha, battles_baseline = baseline
-    battles_desde_baseline = battles_actuales - (battles_baseline or 0)
+    baseline_date, battles_baseline = baseline
+    battles_since_baseline = current_battles - (battles_baseline or 0)
 
-    if battles_desde_baseline < RECENT_BATTLES_THRESHOLD:
+    if battles_since_baseline < RECENT_BATTLES_THRESHOLD:
         return wn8_overall
 
-    snapshot_base = obtener_snapshot_por_fecha(account_id, baseline_fecha)
-    if not snapshot_base:
-        actualizar_baseline(discord_id, guild_id, hoy, battles_actuales)
+    base_snapshot = get_snapshot_by_date(account_id, baseline_date)
+    if not base_snapshot:
+        update_baseline(discord_id, guild_id, today, current_battles)
         return wn8_overall
 
-    tanks_ventana = []
+    tanks_window = []
     for tank in tanks:
         tid = tank["tank_id"]
-        if tid in snapshot_base:
-            base = snapshot_base[tid]
+        if tid in base_snapshot:
+            base = base_snapshot[tid]
             diff_battles = tank["all"]["battles"] - base[0]
             if diff_battles > 0:
-                tanks_ventana.append({
+                tanks_window.append({
                     "tank_id": tid,
                     "all": {
                         "battles": diff_battles,
@@ -418,63 +430,63 @@ async def calcular_wn8_para_rol(discord_id, guild_id, account_id, tanks, wn8_ove
                     }
                 })
         else:
-            tanks_ventana.append(tank)
+            tanks_window.append(tank)
 
     async with aiohttp.ClientSession() as session:
         expected = await fetch_expected_values(session)
-    wn8_ventana = calcular_wn8(tanks_ventana, expected) if tanks_ventana else wn8_overall
+    wn8_window = calculate_wn8(tanks_window, expected) if tanks_window else wn8_overall
 
-    actualizar_baseline(discord_id, guild_id, hoy, battles_actuales)
-    return wn8_ventana
+    update_baseline(discord_id, guild_id, today, current_battles)
+    return wn8_window
 
-async def actualizar_jugador_y_roles(guild, discord_id, wot_username, account_id):
+async def update_player_and_roles(guild, discord_id, wot_username, account_id):
     try:
-        wn8_overall, wn8_reciente, _, _, tanks = await fetch_wn8(wot_username)
+        wn8_overall, wn8_recent, _, _, tanks = await fetch_wn8(wot_username)
         if wn8_overall is None:
             return
 
-        wn8_para_rol = await calcular_wn8_para_rol(discord_id, guild.id, account_id, tanks, wn8_overall)
-        nuevo_rol_nombre, color = get_rol_info(wn8_para_rol)
+        wn8_for_role = await calculate_wn8_for_role(discord_id, guild.id, account_id, tanks, wn8_overall)
+        new_role_name, color = get_role_info(wn8_for_role)
         member = guild.get_member(discord_id)
 
         if member:
-            nombres_a_limpiar = [nombre for _, nombre, _ in WN8_ROLES] + LEGACY_ROLE_NAMES
-            roles_a_quitar = [r for r in member.roles if r.name in nombres_a_limpiar]
-            if roles_a_quitar:
-                await member.remove_roles(*roles_a_quitar)
+            names_to_clean = [name for _, name, _ in WN8_ROLES] + LEGACY_ROLE_NAMES
+            roles_to_remove = [r for r in member.roles if r.name in names_to_clean]
+            if roles_to_remove:
+                await member.remove_roles(*roles_to_remove)
 
-            rol_actualizado = discord.utils.get(guild.roles, name=nuevo_rol_nombre)
-            if not rol_actualizado:
-                rol_actualizado = await guild.create_role(name=nuevo_rol_nombre, color=discord.Color(color))
-            await member.add_roles(rol_actualizado)
+            updated_role = discord.utils.get(guild.roles, name=new_role_name)
+            if not updated_role:
+                updated_role = await guild.create_role(name=new_role_name, color=discord.Color(color))
+            await member.add_roles(updated_role)
 
-        guardar_jugador(discord_id, guild.id, wot_username, account_id, wn8_overall, wn8_reciente, nuevo_rol_nombre)
-        print(f"🔄 [Auto] Updated role for {wot_username} in {guild.name}: {nuevo_rol_nombre}")
+        save_player(discord_id, guild.id, wot_username, account_id, wn8_overall, wn8_recent, new_role_name)
+        print(f"🔄 [Auto] Updated role for {wot_username} in {guild.name}: {new_role_name}")
         await asyncio.sleep(2)
     except Exception as e:
         print(f"❌ Error updating {wot_username}: {e}")
 
-def construir_embed_reporte(guild, jugadores_list, es_prueba=False):
-    titulo = f"📢 Statistics Report - {guild.name}"
-    if es_prueba:
-        titulo += " (Test Mode)"
+def build_report_embed(guild, players_list, is_test=False):
+    title = f"📢 Statistics Report - {guild.name}"
+    if is_test:
+        title += " (Test Mode)"
 
     embed = discord.Embed(
-        title=titulo,
+        title=title,
         description="Updated status of linked members in this server.",
         color=0x2980B9
     )
-    for j in jugadores_list:
-        _, _, wot_username, _, wn8_overall, wn8_reciente, rol_actual, ultima_act = j
+    for p in players_list:
+        _, _, wot_username, _, wn8_overall, wn8_recent, current_role, last_update = p
         embed.add_field(
-            name=f"{rol_actual} {wot_username}",
-            value=f"Overall WN8: `{wn8_overall}` | Recent: `{wn8_reciente}`\nLast update: {ultima_act}",
+            name=f"{current_role} {wot_username}",
+            value=f"Overall WN8: `{wn8_overall}` | Recent: `{wn8_recent}`\nLast update: {last_update}",
             inline=False
         )
     embed.set_footer(text="WoT Stats Bot • Automatically updated roles and stats")
     return embed
 
-def construir_embed_bienvenida():
+def build_welcome_embed():
     embed = discord.Embed(
         title="👋 Thank you for adding TankTracker to your server!",
         description="I am a Discord bot designed to track **World of Tanks** performance (WN8) and manage clan statistics.",
@@ -500,6 +512,7 @@ def construir_embed_bienvenida():
     embed.add_field(
         name="⚙️ Admin Configuration",
         value="`/setup_channel <channel> <days>` • Set the channel and frequency (in days) for automatic reports.\n"
+              "`/unlink_user [member] [wot_username]` • Unlink a specific player's account from the server.\n"
               "`/test_report` • Send an immediate test report to verify the output.\n"
               "`/cleanup_roles` • One-time cleanup of duplicated or legacy WN8 roles.",
         inline=False
@@ -507,43 +520,43 @@ def construir_embed_bienvenida():
     embed.set_footer(text="TankTracker Bot • Maintained 24/7")
     return embed
 
-async def tarea_actualizacion():
-    print(f"🔄 Starting daily automated cycle - {datetime.now(ARGENTINA).strftime('%Y-%m-%d %H:%M')}")
-    configs = obtener_todas_configs()
-    hoy_dt = datetime.now(ARGENTINA).date()
+async def update_task():
+    print(f"🔄 Starting daily automated cycle - {datetime.now(TIMEZONE).strftime('%Y-%m-%d %H:%M')}")
+    configs = get_all_configs()
+    today_dt = datetime.now(TIMEZONE).date()
 
-    for guild_id, channel_id, intervalo, ultima_pub in configs:
+    for guild_id, channel_id, interval, last_pub in configs:
         guild = bot.get_guild(guild_id)
         if not guild:
             continue
 
-        jugadores = obtener_jugadores_por_guild(guild_id)
-        for j in jugadores:
-            d_id, g_id, wot_name, acc_id, _, _, _, _ = j
-            await actualizar_jugador_y_roles(guild, d_id, wot_name, acc_id)
+        players = get_players_by_guild(guild_id)
+        for p in players:
+            d_id, g_id, wot_name, acc_id, _, _, _, _ = p
+            await update_player_and_roles(guild, d_id, wot_name, acc_id)
 
-        debe_publicar = False
-        if not ultima_pub:
-            debe_publicar = True
+        should_publish = False
+        if not last_pub:
+            should_publish = True
         else:
-            ultima_dt = datetime.strptime(ultima_pub, "%Y-%m-%d").date()
-            if (hoy_dt - ultima_dt).days >= intervalo:
-                debe_publicar = True
+            last_dt = datetime.strptime(last_pub, "%Y-%m-%d").date()
+            if (today_dt - last_dt).days >= interval:
+                should_publish = True
 
-        if debe_publicar and channel_id:
+        if should_publish and channel_id:
             channel = guild.get_channel(channel_id)
             if channel:
-                jugadores_actualizados = obtener_jugadores_por_guild(guild_id)
-                if jugadores_actualizados:
-                    embed = construir_embed_reporte(guild, jugadores_actualizados)
+                updated_players = get_players_by_guild(guild_id)
+                if updated_players:
+                    embed = build_report_embed(guild, updated_players)
                     await channel.send(embed=embed)
-                    actualizar_fecha_publicacion(guild_id)
+                    update_publish_date(guild_id)
 
     print("✅ Automated daily cycle and role sync completed.")
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
-    embed = construir_embed_bienvenida()
+    embed = build_welcome_embed()
     for channel in guild.text_channels:
         if channel.permissions_for(guild.me).send_messages:
             await channel.send(embed=embed)
@@ -553,7 +566,7 @@ async def on_guild_join(guild: discord.Guild):
 @app_commands.describe(username="Your World of Tanks username")
 async def link(interaction: discord.Interaction, username: str):
     await interaction.response.defer()
-    wn8_overall, wn8_reciente, account_id, found_name, tanks = await fetch_wn8(username)
+    wn8_overall, wn8_recent, account_id, found_name, tanks = await fetch_wn8(username)
 
     if wn8_overall is None:
         embed = discord.Embed(title="❌ Player Not Found", description=f"Could not find any player named **{username}**.", color=0xE74C3C)
@@ -563,26 +576,26 @@ async def link(interaction: discord.Interaction, username: str):
     guild = interaction.guild
     member = interaction.user
 
-    wn8_para_rol = await calcular_wn8_para_rol(member.id, guild.id, account_id, tanks, wn8_overall)
-    rol_nombre, color = get_rol_info(wn8_para_rol)
+    wn8_for_role = await calculate_wn8_for_role(member.id, guild.id, account_id, tanks, wn8_overall)
+    role_name, color = get_role_info(wn8_for_role)
 
-    nombres_a_limpiar = [nombre for _, nombre, _ in WN8_ROLES] + LEGACY_ROLE_NAMES
-    roles_a_quitar = [r for r in member.roles if r.name in nombres_a_limpiar]
-    if roles_a_quitar:
-        await member.remove_roles(*roles_a_quitar)
+    names_to_clean = [name for _, name, _ in WN8_ROLES] + LEGACY_ROLE_NAMES
+    roles_to_remove = [r for r in member.roles if r.name in names_to_clean]
+    if roles_to_remove:
+        await member.remove_roles(*roles_to_remove)
 
-    rol = discord.utils.get(guild.roles, name=rol_nombre)
-    if not rol:
-        rol = await guild.create_role(name=rol_nombre, color=discord.Color(color))
-    await member.add_roles(rol)
+    role = discord.utils.get(guild.roles, name=role_name)
+    if not role:
+        role = await guild.create_role(name=role_name, color=discord.Color(color))
+    await member.add_roles(role)
 
-    guardar_jugador(member.id, guild.id, found_name, account_id, wn8_overall, wn8_reciente, rol_nombre)
+    save_player(member.id, guild.id, found_name, account_id, wn8_overall, wn8_recent, role_name)
 
     embed = discord.Embed(title="🎮 Account Linked Successfully", description="Your World of Tanks account has been linked.", color=color)
     embed.add_field(name="👤 Player", value=f"`{found_name}`", inline=True)
     embed.add_field(name="⚔️ Overall WN8", value=f"`{wn8_overall}`", inline=True)
-    embed.add_field(name="🔥 Recent WN8", value=f"`{wn8_reciente}`", inline=True)
-    embed.add_field(name="🏅 Rank", value=rol_nombre, inline=False)
+    embed.add_field(name="🔥 Recent WN8", value=f"`{wn8_recent}`", inline=True)
+    embed.add_field(name="🏅 Rank", value=role_name, inline=False)
     embed.add_field(name="🔗 Tomato.gg", value=f"[View Full Profile](https://tomato.gg/stats/{found_name}-{account_id}/NA)", inline=False)
     embed.set_footer(text="WoT Stats Bot • Updated automatically")
     await interaction.followup.send(embed=embed)
@@ -598,9 +611,9 @@ async def unlink(interaction: discord.Interaction):
     guild = interaction.guild
     member = interaction.user
 
-    exito = eliminar_jugador(member.id, guild.id)
+    success = delete_player(member.id, guild.id)
 
-    if not exito:
+    if not success:
         embed = discord.Embed(
             title="⚠️ No Linked Account",
             description="You do not have a registered account in this server.",
@@ -609,11 +622,11 @@ async def unlink(interaction: discord.Interaction):
         await interaction.followup.send(embed=embed)
         return
 
-    nombres_a_limpiar = [nombre for _, nombre, _ in WN8_ROLES] + LEGACY_ROLE_NAMES
-    roles_a_quitar = [r for r in member.roles if r.name in nombres_a_limpiar]
-    if roles_a_quitar:
+    names_to_clean = [name for _, name, _ in WN8_ROLES] + LEGACY_ROLE_NAMES
+    roles_to_remove = [r for r in member.roles if r.name in names_to_clean]
+    if roles_to_remove:
         try:
-            await member.remove_roles(*roles_a_quitar)
+            await member.remove_roles(*roles_to_remove)
         except discord.errors.Forbidden:
             pass
 
@@ -625,6 +638,53 @@ async def unlink(interaction: discord.Interaction):
     embed.set_footer(text="WoT Stats Bot • Unlinked successfully")
     await interaction.followup.send(embed=embed)
 
+@tree.command(name="unlink_user", description="[Admin] Unlink a World of Tanks account from a specific member")
+@app_commands.describe(
+    member="The Discord member to unlink (optional if providing WoT username)",
+    wot_username="The World of Tanks username to unlink (optional if selecting a member)"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def unlink_user(interaction: discord.Interaction, member: discord.Member = None, wot_username: str = None):
+    if not interaction.guild:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
+
+    if not member and not wot_username:
+        await interaction.response.send_message("⚠️ You must specify either a `@Member` or a `wot_username`.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    guild = interaction.guild
+
+    target_id = member.id if member else None
+    success = delete_player_admin(target_id, guild.id, wot_username)
+
+    if not success:
+        embed = discord.Embed(
+            title="⚠️ Player Not Found",
+            description="Could not find any linked account matching the provided criteria in this server.",
+            color=0xF1C40F
+        )
+        await interaction.followup.send(embed=embed)
+        return
+
+    if member:
+        names_to_clean = [name for _, name, _ in WN8_ROLES] + LEGACY_ROLE_NAMES
+        roles_to_remove = [r for r in member.roles if r.name in names_to_clean]
+        if roles_to_remove:
+            try:
+                await member.remove_roles(*roles_to_remove)
+            except discord.errors.Forbidden:
+                pass
+
+    target_display = member.mention if member else f"`{wot_username}`"
+    embed = discord.Embed(
+        title="🔗 Account Unlinked by Admin",
+        description=f"Successfully unlinked account for {target_display} and removed associated stats and roles.",
+        color=0x2ECC71
+    )
+    await interaction.followup.send(embed=embed)
+
 @tree.command(name="player", description="View progress towards WN8 role recalculation (100 battles threshold)")
 @app_commands.describe(username="WoT username (optional if already linked)")
 async def player(interaction: discord.Interaction, username: str = None):
@@ -634,54 +694,54 @@ async def player(interaction: discord.Interaction, username: str = None):
 
     await interaction.response.defer()
 
-    datos = obtener_progreso_jugador(interaction.user.id, interaction.guild.id, username)
+    data = get_player_progress(interaction.user.id, interaction.guild.id, username)
 
-    if not datos:
+    if not data:
         msg = f"Player `{username}` was not found in this server." if username else "You have not linked your account yet. Use `/link <nickname>` first."
         embed_error = discord.Embed(title="❌ Player Not Found", description=msg, color=0xE74C3C)
         await interaction.followup.send(embed=embed_error)
         return
 
-    wot_username, account_id, wn8_overall, wn8_reciente, rol_actual, ultima_act, baseline_fecha, battles_baseline = datos
+    wot_username, account_id, wn8_overall, wn8_recent, current_role, last_update, baseline_date, battles_baseline = data
 
     _, _, _, _, tanks = await fetch_wn8(wot_username)
-    battles_totales = sum(t["all"]["battles"] for t in tanks) if tanks else 0
-    hoy = datetime.now(ARGENTINA).strftime("%Y-%m-%d")
+    total_battles = sum(t["all"]["battles"] for t in tanks) if tanks else 0
+    today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
-    if not baseline_fecha or not battles_baseline or battles_baseline == 0 or battles_baseline > battles_totales:
-        actualizar_baseline(interaction.user.id, interaction.guild.id, hoy, battles_totales)
-        battles_baseline = battles_totales
-        baseline_fecha = hoy
+    if not baseline_date or not battles_baseline or battles_baseline == 0 or battles_baseline > total_battles:
+        update_baseline(interaction.user.id, interaction.guild.id, today, total_battles)
+        battles_baseline = total_battles
+        baseline_date = today
 
-    batallas_en_ventana = max(0, battles_totales - battles_baseline)
-    restantes = max(0, RECENT_BATTLES_THRESHOLD - batallas_en_ventana)
-    porcentaje = min(100, int((batallas_en_ventana / RECENT_BATTLES_THRESHOLD) * 100))
+    battles_in_window = max(0, total_battles - battles_baseline)
+    remaining = max(0, RECENT_BATTLES_THRESHOLD - battles_in_window)
+    percentage = min(100, int((battles_in_window / RECENT_BATTLES_THRESHOLD) * 100))
 
-    bloques_llenos = int(porcentaje / 10)
-    barra = "🟦" * bloques_llenos + "⬜" * (10 - bloques_llenos)
+    filled_blocks = int(percentage / 10)
+    bar = "🟦" * filled_blocks + "⬜" * (10 - filled_blocks)
 
-    rol_nombre, color = get_rol_info(wn8_overall)
+    role_name, color = get_role_info(wn8_overall)
 
     embed = discord.Embed(title=f"👤 Player Profile - {wot_username}", color=color)
-    embed.add_field(name="🏅 Assigned Role", value=f"**{rol_actual}**", inline=True)
+    embed.add_field(name="🏅 Assigned Role", value=f"**{current_role}**", inline=True)
     embed.add_field(name="⚔️ Overall WN8", value=f"`{wn8_overall}`", inline=True)
-    embed.add_field(name="🔥 Recent WN8", value=f"`{wn8_reciente}`", inline=True)
-    embed.add_field(name="💥 Total Battles", value=f"`{battles_totales:,}`", inline=True)
+    embed.add_field(name="🔥 Recent WN8", value=f"`{wn8_recent}`", inline=True)
+    embed.add_field(name="💥 Total Battles", value=f"`{total_battles:,}`", inline=True)
 
-    info_progreso = (
-        f"{barra} **{porcentaje}%**\n"
-        f"• **Played in current window:** `{batallas_en_ventana}` / `{RECENT_BATTLES_THRESHOLD}` battles\n"
+    progress_info = (
+        f"{bar} **{percentage}%**\n"
+        f"• **Played in current window:** `{battles_in_window}` / `{RECENT_BATTLES_THRESHOLD}` battles\n"
     )
-    if restantes > 0:
-        info_progreso += f"• **Remaining:** **{restantes}** battles to update role based on recent performance."
+    if remaining > 0:
+        progress_info += f"• **Remaining:** **{remaining}** battles to update role based on recent performance."
     else:
-        info_progreso += "• ⚡ **Ready to update!** You have completed over 100 battles. Your role will update during the daily report or upon using `/link`."
+        progress_info += "• ⚡ **Ready to update!** You have completed over 100 battles. Your role will update during the daily report or upon using `/link`."
 
-    embed.add_field(name="📊 Progress for New Role (100 Battles Window)", value=info_progreso, inline=False)
+    embed.add_field(name="📊 Progress for New Role (100 Battles Window)", value=progress_info, inline=False)
     
-    if baseline_fecha:
-        embed.add_field(name="📅 Window Start Date", value=f"`{baseline_fecha}`\n(`{battles_baseline:,}` battles)", inline=True)
-    embed.add_field(name="🕒 Last Data Sync", value=f"`{ultima_act}`", inline=True)
+    if baseline_date:
+        embed.add_field(name="📅 Window Start Date", value=f"`{baseline_date}`\n(`{battles_baseline:,}` battles)", inline=True)
+    embed.add_field(name="🕒 Last Data Sync", value=f"`{last_update}`", inline=True)
 
     embed.add_field(
         name="🔗 Links", 
@@ -696,18 +756,18 @@ async def player(interaction: discord.Interaction, username: str = None):
 @app_commands.describe(username="World of Tanks in-game username")
 async def stats(interaction: discord.Interaction, username: str):
     await interaction.response.defer()
-    wn8_overall, wn8_reciente, account_id, found_name, _ = await fetch_wn8(username)
+    wn8_overall, wn8_recent, account_id, found_name, _ = await fetch_wn8(username)
 
     if wn8_overall is None:
         embed = discord.Embed(title="❌ Player Not Found", description=f"Could not find any player named **{username}**.", color=0xE74C3C)
         await interaction.followup.send(embed=embed)
         return
 
-    rol_nombre, color = get_rol_info(wn8_overall)
+    role_name, color = get_role_info(wn8_overall)
     embed = discord.Embed(title=f"📊 Stats for {found_name}", color=color)
     embed.add_field(name="⚔️ Overall WN8", value=f"`{wn8_overall}`", inline=True)
-    embed.add_field(name="🔥 Recent WN8", value=f"`{wn8_reciente}`", inline=True)
-    embed.add_field(name="🏅 Rank", value=rol_nombre, inline=True)
+    embed.add_field(name="🔥 Recent WN8", value=f"`{wn8_recent}`", inline=True)
+    embed.add_field(name="🏅 Rank", value=role_name, inline=True)
     embed.add_field(name="🔗 Tomato.gg", value=f"[View Full Profile](https://tomato.gg/stats/{found_name}-{account_id}/NA)", inline=False)
     embed.set_footer(text="WoT Stats Bot • Calculated using XVM expected values")
     await interaction.followup.send(embed=embed)
@@ -718,51 +778,51 @@ async def players(interaction: discord.Interaction):
         await interaction.response.send_message("This command can only be used in a server.")
         return
 
-    jugadores_list = obtener_jugadores_por_guild(interaction.guild.id)
-    if not jugadores_list:
+    players_list = get_players_by_guild(interaction.guild.id)
+    if not players_list:
         await interaction.response.send_message("There are no linked players in this server yet.")
         return
 
     embed = discord.Embed(title=f"🎮 Linked Players - {interaction.guild.name}", color=0x2980B9)
-    for j in jugadores_list:
-        _, _, wot_username, _, wn8_overall, wn8_reciente, rol_actual, ultima_act = j
+    for p in players_list:
+        _, _, wot_username, _, wn8_overall, wn8_recent, current_role, last_update = p
         embed.add_field(
-            name=f"{rol_actual} {wot_username}",
-            value=f"WN8: `{wn8_overall}` | Recent: `{wn8_reciente}`\nLast updated: {ultima_act}",
+            name=f"{current_role} {wot_username}",
+            value=f"WN8: `{wn8_overall}` | Recent: `{wn8_recent}`\nLast updated: {last_update}",
             inline=False
         )
     await interaction.response.send_message(embed=embed)
 
 @tree.command(name="setup_channel", description="Configure the channel and frequency (in days) for automatic stats reports")
 @app_commands.describe(
-    canal="Text channel where automatic reports will be posted",
-    dias="Interval in days between reports (e.g. 1, 3, 7 days)"
+    channel="Text channel where automatic reports will be posted",
+    days="Interval in days between reports (e.g. 1, 3, 7 days)"
 )
 @app_commands.checks.has_permissions(administrator=True)
-async def setup_channel(interaction: discord.Interaction, canal: discord.TextChannel, dias: int):
-    if dias < 1:
+async def setup_channel(interaction: discord.Interaction, channel: discord.TextChannel, days: int):
+    if days < 1:
         await interaction.response.send_message("Days interval must be at least 1 day.", ephemeral=True)
         return
 
-    config_actual = obtener_config_guild(interaction.guild.id)
+    current_config = get_guild_config(interaction.guild.id)
 
-    if config_actual:
-        canal_actual_id, dias_actuales, _ = config_actual
-        if canal_actual_id == canal.id and dias_actuales == dias:
+    if current_config:
+        current_channel_id, current_days, _ = current_config
+        if current_channel_id == channel.id and current_days == days:
             embed = discord.Embed(
                 title="⚠️ Duplicate Configuration",
-                description=f"Channel {canal.mention} is **already set** to receive reports every **{dias}** days.\n"
+                description=f"Channel {channel.mention} is **already set** to receive reports every **{days}** days.\n"
                             f"No changes were made.",
                 color=0xF1C40F
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
-    guardar_config_guild(interaction.guild.id, canal.id, dias)
+    save_guild_config(interaction.guild.id, channel.id, days)
     embed = discord.Embed(
         title="⚙️ Configuration Saved",
-        description=f"✅ **Assigned Channel:** {canal.mention}\n"
-                    f"📅 **Frequency:** Every **{dias}** days an automatic report will be posted with updated stats for all linked members.\n\n"
+        description=f"✅ **Assigned Channel:** {channel.mention}\n"
+                    f"📅 **Frequency:** Every **{days}** days an automatic report will be posted with updated stats for all linked members.\n\n"
                     f"💡 *You can use `/test_report` to verify the output.*",
         color=0x2ECC71
     )
@@ -777,57 +837,57 @@ async def test_report(interaction: discord.Interaction):
 
     await interaction.response.defer()
 
-    jugadores_list = obtener_jugadores_por_guild(interaction.guild.id)
-    if not jugadores_list:
+    players_list = get_players_by_guild(interaction.guild.id)
+    if not players_list:
         await interaction.followup.send("⚠️ No linked players found in this server to generate a test report.")
         return
 
-    config = obtener_config_guild(interaction.guild.id)
-    canal_destino = interaction.channel
+    config = get_guild_config(interaction.guild.id)
+    target_channel = interaction.channel
     if config and config[0]:
         c = interaction.guild.get_channel(config[0])
         if c:
-            canal_destino = c
+            target_channel = c
 
     try:
-        embed = construir_embed_reporte(interaction.guild, jugadores_list, es_prueba=True)
-        await canal_destino.send(embed=embed)
+        embed = build_report_embed(interaction.guild, players_list, is_test=True)
+        await target_channel.send(embed=embed)
 
-        if canal_destino != interaction.channel:
-            await interaction.followup.send(f"✅ Test report sent successfully to {canal_destino.mention}")
+        if target_channel != interaction.channel:
+            await interaction.followup.send(f"✅ Test report sent successfully to {target_channel.mention}")
         else:
             await interaction.followup.send("✅ Test report sent in this channel.")
     except discord.errors.Forbidden:
-        await interaction.followup.send(f"❌ **Permission Error:** The bot lacks permissions to send messages in {canal_destino.mention}. Please grant 'View Channel' and 'Send Messages' permissions.")
+        await interaction.followup.send(f"❌ **Permission Error:** The bot lacks permissions to send messages in {target_channel.mention}. Please grant 'View Channel' and 'Send Messages' permissions.")
 
 @tree.command(name="cleanup_roles", description="[Admin] Remove duplicate or legacy WN8 roles from all server members")
 @app_commands.checks.has_permissions(administrator=True)
 async def cleanup_roles(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
-    limpiados = 0
+    cleaned_members = 0
 
     for member in guild.members:
-        roles_legacy_del_miembro = [r for r in member.roles if r.name in LEGACY_ROLE_NAMES]
-        if roles_legacy_del_miembro:
-            await member.remove_roles(*roles_legacy_del_miembro)
-            limpiados += 1
+        member_legacy_roles = [r for r in member.roles if r.name in LEGACY_ROLE_NAMES]
+        if member_legacy_roles:
+            await member.remove_roles(*member_legacy_roles)
+            cleaned_members += 1
 
-    roles_borrados = 0
-    for nombre_viejo in LEGACY_ROLE_NAMES:
-        rol = discord.utils.get(guild.roles, name=nombre_viejo)
-        if rol:
-            await rol.delete(reason="Cleanup legacy roles")
-            roles_borrados += 1
+    deleted_roles = 0
+    for old_name in LEGACY_ROLE_NAMES:
+        role = discord.utils.get(guild.roles, name=old_name)
+        if role:
+            await role.delete(reason="Cleanup legacy roles")
+            deleted_roles += 1
 
     await interaction.followup.send(
-        f"✅ Cleanup completed. {limpiados} members had legacy roles removed, {roles_borrados} legacy roles deleted from the server.",
+        f"✅ Cleanup completed. {cleaned_members} members had legacy roles removed, {deleted_roles} legacy roles deleted from the server.",
         ephemeral=True
     )
 
 @tree.command(name="help", description="Show bot information, commands list, and admin guide")
 async def help(interaction: discord.Interaction):
-    embed = construir_embed_bienvenida()
+    embed = build_welcome_embed()
     await interaction.response.send_message(embed=embed)
 
 @bot.event
@@ -838,8 +898,8 @@ async def on_ready():
     print(f"✅ Bot connected as {bot.user}")
     print(f"✅ Active in {len(bot.guilds)} servers.")
 
-    scheduler = AsyncIOScheduler(timezone=ARGENTINA)
-    scheduler.add_job(tarea_actualizacion, "cron", hour=7, minute=0)
+    scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+    scheduler.add_job(update_task, "cron", hour=7, minute=0)
     scheduler.start()
     print("✅ Daily automatic update scheduled.")
 
